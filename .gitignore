@@ -172,3 +172,4 @@ dist
 .wrangler/
 
 wrangler.toml
+.DS_Store
