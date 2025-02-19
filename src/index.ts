@@ -35,7 +35,7 @@ export default {
 				const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
 
 				const ip = request.headers.get('x-forwarded-for');
-
+				console.log("IP: ", ip);
 				let hashIp = '';
 
 				if (ip) {
