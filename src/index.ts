@@ -1,6 +1,6 @@
 import { PinataSDK } from 'pinata-web3';
 import { banner } from './utils/banner';
-import { classifyRequest, getNormalizedReferrer, trackPageView } from './utils/analytics';
+import { classifyRequest, getHashedIp, getNormalizedReferrer, trackPageView } from './utils/analytics';
 
 export interface Env {
 	ALCHEMY_URL: string;
@@ -34,21 +34,16 @@ export default {
 				const referer = request.headers.get('referer');
 				const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
 
-				const ip = request.headers.get('cf-connecting-ip');
-				
+				const ip = request.headers.get('x-forwarded-for');
+
+				let hashIp = '';
+
 				if (ip) {
-					console.log('IP: ', ip);
+					console.log({ip});
+					hashIp = await getHashedIp(ip)
+					console.log({hashIp});
 				}
 
-				const realIP = request.headers.get('x-real-ip');
-				const forwardedFor = request.headers.get('x-forwarded-for');
-				const cfConnectingIP = request.headers.get('cf-connecting-ip');
-
-				console.log({
-					realIP,
-					forwardedFor,
-					cfConnectingIP,
-				});
 				// Non-blocking analytics
 				trackPageView(env, {
 					siteId: reqUrl.hostname,
@@ -57,7 +52,7 @@ export default {
 					country: request.headers.get('cf-ipcountry') || '',
 					city: request.headers.get('cf-ipcity') || '',
 					referrer: normalizedReferer,
-					ipAddress: ip || '',
+					ipAddress: hashIp || '',
 				}).catch((error) => console.error('Analytics failed:', error));
 			}
 
