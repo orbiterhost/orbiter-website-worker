@@ -31,13 +31,24 @@ export default {
 			}
 
 			if (classification.shouldTrack) {
-				const referer = request.headers.get('referer');			
+				const referer = request.headers.get('referer');
 				const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
 
 				const ip = request.headers.get('cf-connecting-ip');
-				if(ip) {
-					console.log("IP: ", ip);
+				
+				if (ip) {
+					console.log('IP: ', ip);
 				}
+
+				const realIP = request.headers.get('x-real-ip');
+				const forwardedFor = request.headers.get('x-forwarded-for');
+				const cfConnectingIP = request.headers.get('cf-connecting-ip');
+
+				console.log({
+					realIP,
+					forwardedFor,
+					cfConnectingIP,
+				});
 				// Non-blocking analytics
 				trackPageView(env, {
 					siteId: reqUrl.hostname,
