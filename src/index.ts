@@ -159,6 +159,8 @@ export default {
 					'Content-Type': contentType || 'text/plain',
 					'Access-Control-Allow-Origin': '*',
 					'Cache-Control': 'public, max-age=3600',
+					'Server': 'Orbiter', 
+					'orb-cid': cid || ""
 				},
 			});
 		} catch (error) {
