@@ -5,6 +5,7 @@ import { classifyRequest, getHashedIp, getNormalizedReferrer, trackPageView } fr
 export interface Env {
 	ALCHEMY_URL: string;
 	ORBITER_SITES: KVNamespace;
+	SITE_CONTRACT: KVNamespace;
 	PINATA_GATEWAY: string;
 	SITE_PLANS: KVNamespace;
 	SITE_TO_ORG: KVNamespace;
@@ -81,8 +82,8 @@ export default {
 			console.log({ orgId });
 
 			//	Get site CID and plan
-			let [siteCid, plan] = await Promise.all([env.ORBITER_SITES.get(siteKey), env.SITE_PLANS.get(orgId)]);
-
+			let [siteCid, plan, contract] = await Promise.all([env.ORBITER_SITES.get(siteKey), env.SITE_PLANS.get(orgId), env.SITE_CONTRACT.get(siteKey)]);
+			console.log({contract});
 			const isUsingVersionCid = versionCid && (await pinata.gateways.containsCID(versionCid));
 			const cid = isUsingVersionCid ? versionCid : siteCid;
 
@@ -160,7 +161,8 @@ export default {
 					'Access-Control-Allow-Origin': '*',
 					'Cache-Control': 'public, max-age=3600',
 					'Powered-By': 'Orbiter', 
-					'orb-cid': cid || ""
+					'orb-cid': cid || "", 
+					'orb-contract': contract || ""
 				},
 			});
 		} catch (error) {

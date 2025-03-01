@@ -45,6 +45,10 @@ id = "cd51f5e3da4946d99530e1b825d94b2e"
 binding = "RATE_LIMIT"
 id = "dab58d6840824f3bacccc315a50d3651"
 
+[[kv_namespaces]]
+binding = "SITE_CONTRACT"
+id = "0a2dc5df8dda441aa9a7b47a09411001"
+
 # Bind the Workers AI model catalog. Run machine learning models, powered by serverless GPUs, on Cloudflare’s global network
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#workers-ai
 # [ai]
