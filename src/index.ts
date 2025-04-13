@@ -1,5 +1,4 @@
 import { PinataSDK } from 'pinata-web3';
-import { banner } from './utils/banner';
 import { classifyRequest, getHashedIp, getNormalizedReferrer, trackPageView } from './utils/analytics';
 
 export interface Env {
@@ -89,11 +88,6 @@ export default {
 
 			console.log({ cid });
 
-			// //	@TODO this is a manual hack to not show the banner on our orbiter.host site
-			// if (siteKey === "marketing") {
-			// 	plan = 'orbit';
-			// }
-
 			if (!cid) {
 				throw new Error(`Failed to fetch latest state: ${cid}`);
 			}
@@ -132,7 +126,7 @@ export default {
 
 			const contentType = response.headers.get('Content-Type') || 'text/html';
 			let body: any = response.body;
-			// If this is an HTML file, we need to rewrite any asset URLs and potentially inject the banner
+			// If this is an HTML file, we need to rewrite any asset URLs
 			if (contentType?.includes('text/html')) {
 				const text = await response.text();
 				// Rewrite relative URLs for assets AND add the version CID if we're using one
@@ -145,11 +139,6 @@ export default {
 				});
 
 				body = modifiedHtml;
-
-				// Inject banner if site is on free plan
-				if (plan === 'free' || !plan) {
-					body = body.replace('</body>', `${banner}</body>`);
-				}
 			}
 
 			// Create response with appropriate headers
