@@ -60,7 +60,8 @@ export default {
 			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
 			const isUsingVersionCid = Boolean(versionCid) && (await pinata.gateways.containsCID(versionCid!));
 
-			const cid = 'bafybeibtzn6aotnryxg3midegpdh5g33zti4ic3j4j7qqrew3a2ee7mypu'; //isUsingVersionCid ? versionCid : siteCid;
+			//const cid = 'bafybeibtzn6aotnryxg3midegpdh5g33zti4ic3j4j7qqrew3a2ee7mypu';
+		 const cid = isUsingVersionCid ? versionCid : siteCid;
 			if (!cid) throw new Error(`No CID for site ${siteKey}`);
 
 			const gatewayUrl = await pinata.gateways.convert(cid);
