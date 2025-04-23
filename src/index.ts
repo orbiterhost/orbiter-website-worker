@@ -55,15 +55,12 @@ export default {
 			}
 
 			const siteKey = reqUrl.hostname.endsWith('orbiter.website') ? reqUrl.hostname.split('.')[0] : reqUrl.hostname;
-			const [siteCid, contract] = await Promise.all([
-				env.ORBITER_SITES.get(siteKey),
-				env.SITE_CONTRACT.get(siteKey),
-			]);
+			const [siteCid, contract] = await Promise.all([env.ORBITER_SITES.get(siteKey), env.SITE_CONTRACT.get(siteKey)]);
 
 			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
 			const isUsingVersionCid = Boolean(versionCid) && (await pinata.gateways.containsCID(versionCid!));
-			
-			const cid = isUsingVersionCid ? versionCid : siteCid;
+
+			const cid = 'bafybeibtzn6aotnryxg3midegpdh5g33zti4ic3j4j7qqrew3a2ee7mypu'; //isUsingVersionCid ? versionCid : siteCid;
 			if (!cid) throw new Error(`No CID for site ${siteKey}`);
 
 			const gatewayUrl = await pinata.gateways.convert(cid);
@@ -95,18 +92,34 @@ export default {
 					baseUrl.pathname += '/';
 				}
 
-				const rewriter = new HTMLRewriter().on('img,script,link', {
-					element(el) {
-						const attr = el.tagName === 'link' ? 'href' : 'src';
-						const val = el.getAttribute(attr);
-						if (val && !/^https?:\/\//.test(val) && !val.startsWith('data:')) {
-							// now this will correctly resolve nested assets
-							const resolvedPath = new URL(val, baseUrl).pathname;
-							const suffix = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
-							el.setAttribute(attr, `${resolvedPath}${suffix}`);
-						}
-					},
-				});
+				const rewriter = new HTMLRewriter()
+					// your existing asset‐tag rewrite
+					.on('img,script,link', {
+						element(el) {
+							const attr = el.tagName === 'link' ? 'href' : 'src';
+							const val = el.getAttribute(attr);
+							if (val && !/^https?:\/\//.test(val) && !val.startsWith('data:')) {
+								const resolved = new URL(val, baseUrl).pathname;
+								const suffix = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
+								el.setAttribute(attr, `${resolved}${suffix}`);
+							}
+						},
+					})
+					// **new**: catch every CSS url(...) in your <style> blocks
+					.on('style', {
+						text(textNode) {
+							const css = textNode.text;
+							// match url(foo.png), url('foo.png'), url("foo.png"), but not absolute URLs
+							const rewritten = css.replace(/url\(\s*(['"]?)(?!https?:\/\/|\/\/|data:)(.+?)\1\s*\)/g, (_match, quote, path) => {
+								const resolved = new URL(path, baseUrl).pathname;
+								const suffix = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
+								return `url(${quote}${resolved}${suffix}${quote})`;
+							});
+							if (rewritten !== css) {
+								textNode.replace(rewritten, { html: false });
+							}
+						},
+					});
 
 				finalResponse = rewriter.transform(response);
 			} else {
