@@ -20,139 +20,112 @@ export default {
 
 		try {
 			const reqUrl = new URL(request.url);
-
 			let classification;
-
 			try {
 				classification = classifyRequest(request, reqUrl.pathname);
-			} catch (error) {
-				console.error('Classification failed:', error);
+			} catch (e) {
+				console.error('Classification failed:', e);
 				classification = { isBot: true, isAsset: false, shouldTrack: false };
 			}
 
 			if (classification.shouldTrack) {
-				const referer = request.headers.get('referer');
-				const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
-
-				const ip = request.headers.get('x-forwarded-for');
-				console.log("IP: ", ip);
-				let hashIp = '';
-
-				if (ip) {
-					console.log({ip});
-					hashIp = await getHashedIp(ip)
-					console.log({hashIp});
-				}
-
-				// Non-blocking analytics
+				const referer = request.headers.get('referer') ?? 'direct';
+				const ip = request.headers.get('x-forwarded-for') || '';
+				const hashIp = ip ? await getHashedIp(ip) : '';
 				trackPageView(env, {
 					siteId: reqUrl.hostname,
 					path: reqUrl.pathname,
 					userAgent: request.headers.get('user-agent') || '',
 					country: request.headers.get('cf-ipcountry') || '',
 					city: request.headers.get('cf-ipcity') || '',
-					referrer: normalizedReferer,
-					ipAddress: hashIp || '',
-				}).catch((error) => console.error('Analytics failed:', error));
+					referrer: getNormalizedReferrer(referer),
+					ipAddress: hashIp,
+				}).catch((e) => console.error('Analytics failed:', e));
 			}
 
-			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
-
-			const pathName = reqUrl.pathname;
-			const hostname = reqUrl.hostname;
-
-			// Block PHP file requests early
-			if (pathName.toLowerCase().endsWith('.php')) {
+			// block PHP
+			if (reqUrl.pathname.toLowerCase().endsWith('.php')) {
 				return new Response('Not Found', {
 					status: 404,
 					headers: {
 						'Content-Type': 'text/plain',
-						'Cache-Control': 'public, max-age=86400', // Cache for 24 hours
+						'Cache-Control': 'public, max-age=86400',
 					},
 				});
 			}
 
-			let siteKey = hostname.endsWith('orbiter.website') ? hostname.split('.')[0] : hostname;
-
-			console.log({ siteKey });
-
+			const siteKey = reqUrl.hostname.endsWith('orbiter.website') ? reqUrl.hostname.split('.')[0] : reqUrl.hostname;
 			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || '0';
+			const [siteCid, plan, contract] = await Promise.all([
+				env.ORBITER_SITES.get(siteKey),
+				env.SITE_PLANS.get(orgId),
+				env.SITE_CONTRACT.get(siteKey),
+			]);
 
-			console.log({ orgId });
+			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
+			const isUsingVersionCid = Boolean(versionCid) && (await pinata.gateways.containsCID(versionCid!));
+			const cid = 'bafybeictvqcfjdv2jgzgx752cxqc5gqs5ceon2cjk5u4oyibcf4xsuh3jm'; //isUsingVersionCid ? versionCid : siteCid;
+			if (!cid) throw new Error(`No CID for site ${siteKey}`);
 
-			//	Get site CID and plan
-			let [siteCid, plan, contract] = await Promise.all([env.ORBITER_SITES.get(siteKey), env.SITE_PLANS.get(orgId), env.SITE_CONTRACT.get(siteKey)]);
-			console.log({contract});
-			const isUsingVersionCid = versionCid && (await pinata.gateways.containsCID(versionCid));
-			const cid = isUsingVersionCid ? versionCid : siteCid;
-
-			console.log({ cid });
-
-			if (!cid) {
-				throw new Error(`Failed to fetch latest state: ${cid}`);
-			}
-
-			// Get base IPFS URL
-			let gatewayUrl = await pinata.gateways.convert(cid as string);
+			const gatewayUrl = await pinata.gateways.convert(cid);
 			let response: Response | null = null;
+			const cleanPath = reqUrl.pathname.slice(1);
 
-			if (pathName && pathName !== '/') {
-				const cleanPath = pathName.startsWith('/') ? pathName.slice(1) : pathName;
-				if (!cleanPath.includes('.')) {
-					// First, try fetching index.html from the directory
-					const indexPath = `${gatewayUrl}/${cleanPath}/index.html`;
-					response = await fetch(indexPath);
-
-					// If that fails, try appending .html to the path
-					if (!response.ok) {
-						const htmlPath = `${gatewayUrl}/${cleanPath}.html`;
-						response = await fetch(htmlPath);
-					}
-				} else {
-					// Path includes an extension, fetch directly
-					response = await fetch(`${gatewayUrl}/${cleanPath}`);
+			if (reqUrl.pathname === '/' || cleanPath === '') {
+				response = await fetch(`${gatewayUrl}/index.html`);
+			} else if (!cleanPath.includes('.')) {
+				response = await fetch(`${gatewayUrl}/${cleanPath}/index.html`);
+				if (!response.ok) {
+					response = await fetch(`${gatewayUrl}/${cleanPath}.html`);
 				}
 			} else {
-				// Root path, fetch index.html
-				response = await fetch(`${gatewayUrl}/index.html`);
+				response = await fetch(`${gatewayUrl}/${cleanPath}`);
 			}
-
-			// If all attempts fail, try as a single file
 			if (!response?.ok) {
-				console.log('All failed final check');
-				gatewayUrl = gatewayUrl.split('/index.html')[0];
+				// final fallback to root CID
 				response = await fetch(gatewayUrl);
 			}
 
+			// Now the HTMLRewriter integration:
 			const contentType = response.headers.get('Content-Type') || 'text/html';
-			let body: any = response.body;
-			// If this is an HTML file, we need to rewrite any asset URLs
-			if (contentType?.includes('text/html')) {
-				const text = await response.text();
-				// Rewrite relative URLs for assets AND add the version CID if we're using one
-				const modifiedHtml = text.replace(/(src|href)=("|')(?!http|\/\/|data:)([^"']*)("|')/g, (match, attr, quote, path) => {
-					// If path starts with /, it's already absolute
-					const assetPath = path.startsWith('/') ? path : `/${path}`;
-					// Add the version CID to the URL if we're using one
-					const versionParam = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
-					return `${attr}=${quote}${assetPath}${versionParam}${quote}`;
+			let finalResponse: Response;
+			if (contentType.includes('text/html')) {
+				// build a base URL that always ends in "/"
+				const baseUrl = new URL(request.url);
+				if (!baseUrl.pathname.endsWith('/')) {
+					baseUrl.pathname += '/';
+				}
+
+				const rewriter = new HTMLRewriter().on('img,script,link', {
+					element(el) {
+						const attr = el.tagName === 'link' ? 'href' : 'src';
+						const val = el.getAttribute(attr);
+						if (val && !/^https?:\/\//.test(val) && !val.startsWith('data:')) {
+							// now this will correctly resolve nested assets
+							const resolvedPath = new URL(val, baseUrl).pathname;
+							const suffix = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
+							el.setAttribute(attr, `${resolvedPath}${suffix}`);
+						}
+					},
 				});
 
-				body = modifiedHtml;
+				finalResponse = rewriter.transform(response);
+			} else {
+				finalResponse = response;
 			}
 
-			// Create response with appropriate headers
-			return new Response(body, {
-				status: response.status,
-				statusText: response.statusText,
-				headers: {
-					'Content-Type': contentType || 'text/plain',
-					'Access-Control-Allow-Origin': '*',
-					'Cache-Control': 'public, max-age=3600',
-					'Powered-By': 'Orbiter', 
-					'orb-cid': cid || "", 
-					'orb-contract': contract || ""
-				},
+			const headers = new Headers(finalResponse.headers);
+			headers.set('Content-Type', contentType);
+			headers.set('Access-Control-Allow-Origin', '*');
+			headers.set('Cache-Control', 'public, max-age=3600');
+			headers.set('Powered-By', 'Orbiter');
+			headers.set('orb-cid', cid);
+			headers.set('orb-contract', contract || '');
+
+			return new Response(finalResponse.body, {
+				status: finalResponse.status,
+				statusText: finalResponse.statusText,
+				headers,
 			});
 		} catch (error) {
 			console.error('Error:', error);
