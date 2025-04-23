@@ -55,16 +55,14 @@ export default {
 			}
 
 			const siteKey = reqUrl.hostname.endsWith('orbiter.website') ? reqUrl.hostname.split('.')[0] : reqUrl.hostname;
-			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || '0';
-			const [siteCid, plan, contract] = await Promise.all([
+			const [siteCid, contract] = await Promise.all([
 				env.ORBITER_SITES.get(siteKey),
-				env.SITE_PLANS.get(orgId),
 				env.SITE_CONTRACT.get(siteKey),
 			]);
 
 			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
 			const isUsingVersionCid = Boolean(versionCid) && (await pinata.gateways.containsCID(versionCid!));
-			//const cid = 'bafybeics2nzbmtezvkn2ihvjpk6emdjtk3uf63pfthoqcu7sck2vllbppq';
+			
 			const cid = isUsingVersionCid ? versionCid : siteCid;
 			if (!cid) throw new Error(`No CID for site ${siteKey}`);
 
