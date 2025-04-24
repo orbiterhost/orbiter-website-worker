@@ -61,7 +61,7 @@ export default {
 			const isUsingVersionCid = Boolean(versionCid) && (await pinata.gateways.containsCID(versionCid!));
 
 			//const cid = 'bafybeibtzn6aotnryxg3midegpdh5g33zti4ic3j4j7qqrew3a2ee7mypu';
-		 const cid = isUsingVersionCid ? versionCid : siteCid;
+			const cid = 'bafybeicnwk7xwd54jsxkfaij4t3cdmqx3opfpp372l4amhiqymuo3n5iai'; //isUsingVersionCid ? versionCid : siteCid;
 			if (!cid) throw new Error(`No CID for site ${siteKey}`);
 
 			const gatewayUrl = await pinata.gateways.convert(cid);
@@ -95,24 +95,38 @@ export default {
 
 				const rewriter = new HTMLRewriter()
 					// your existing asset‐tag rewrite
-					.on('img,script,link', {
+					.on('img,script,link,audio,video,source,embed,iframe,object,canvas', {
 						element(el) {
 							const attr = el.tagName === 'link' ? 'href' : 'src';
 							const val = el.getAttribute(attr);
 							if (val && !/^https?:\/\//.test(val) && !val.startsWith('data:')) {
-								const resolved = new URL(val, baseUrl).pathname;
+								// If the path doesn't start with a slash, ensure it's treated as relative
+								// to the current path (preserve /person/ prefix)
+								let resolved;
+								if (!val.startsWith('/')) {
+									// For relative paths, preserve the current directory context
+									resolved = new URL(val, baseUrl).pathname;
+								} else {
+									// For absolute paths (starting with /), use as is
+									resolved = val;
+								}
 								const suffix = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
 								el.setAttribute(attr, `${resolved}${suffix}`);
 							}
 						},
 					})
-					// **new**: catch every CSS url(...) in your <style> blocks
 					.on('style', {
 						text(textNode) {
 							const css = textNode.text;
-							// match url(foo.png), url('foo.png'), url("foo.png"), but not absolute URLs
 							const rewritten = css.replace(/url\(\s*(['"]?)(?!https?:\/\/|\/\/|data:)(.+?)\1\s*\)/g, (_match, quote, path) => {
-								const resolved = new URL(path, baseUrl).pathname;
+								let resolved;
+								if (!path.startsWith('/')) {
+									// For relative paths, preserve the current directory context
+									resolved = new URL(path, baseUrl).pathname;
+								} else {
+									// For absolute paths (starting with /), use as is
+									resolved = path;
+								}
 								const suffix = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
 								return `url(${quote}${resolved}${suffix}${quote})`;
 							});
@@ -120,9 +134,36 @@ export default {
 								textNode.replace(rewritten, { html: false });
 							}
 						},
+					})
+					.on('*[style]', {
+						element(el) {
+							const style = el.getAttribute('style');
+							if (style && style.includes('url(')) {
+								const rewritten = style.replace(/url\(\s*(['"]?)(?!https?:\/\/|\/\/|data:)(.+?)\1\s*\)/g, (_match, quote, path) => {
+									let resolved;
+									if (!path.startsWith('/')) {
+										// For relative paths, preserve the current directory context
+										resolved = new URL(path, baseUrl).pathname;
+									} else {
+										// For absolute paths (starting with /), use as is
+										resolved = path;
+									}
+									const suffix = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
+									return `url(${quote}${resolved}${suffix}${quote})`;
+								});
+
+								if (rewritten !== style) {
+									el.setAttribute('style', rewritten);
+								}
+							}
+						},
 					});
 
 				finalResponse = rewriter.transform(response);
+			} else if(contentType.includes('javascript')) {
+				console.log("Javascript loaded");
+				console.log(response);
+				finalResponse = response;
 			} else {
 				finalResponse = response;
 			}
