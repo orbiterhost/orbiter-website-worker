@@ -4,6 +4,11 @@ main = "src/index.ts"
 compatibility_date = "2024-12-18"
 compatibility_flags = ["nodejs_compat"]
 
+[[r2_buckets]]
+binding = "SITES_BUCKET"
+bucket_name = "orbiter-sites" 
+preview_bucket_name = "orbiter-sites"
+
 # Workers Logs
 # Docs: https://developers.cloudflare.com/workers/observability/logs/workers-logs/
 # Configuration: https://developers.cloudflare.com/workers/observability/logs/workers-logs/#enable-workers-logs
@@ -32,22 +37,27 @@ CHANNEL_ID = "C086DDCVA5R"
 [[kv_namespaces]]
 binding = "ORBITER_SITES"
 id = "87778ebb68c7482f81e47dca0dc8f5b5"
+preview_id = "fca30bceff494f198203045f09c5802d"
 
 [[kv_namespaces]]
 binding = "SITE_PLANS"
 id = "37743b06fcc7439e93e54d0866cf56b0"
+preview_id = "beff8871223b476bb1ba89b000ed7a3b"
 
 [[kv_namespaces]]
 binding = "SITE_TO_ORG"
 id = "cd51f5e3da4946d99530e1b825d94b2e"
+preview_id = "64ea2513d10143c5a4a26acb43b3127e"
 
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
 id = "dab58d6840824f3bacccc315a50d3651"
+preview_id = "0e3a98cbd5234a509f1325c452919269"
 
 [[kv_namespaces]]
 binding = "SITE_CONTRACT"
 id = "0a2dc5df8dda441aa9a7b47a09411001"
+preview_id = "0429e87c98e44e908270d208c4241383"
 
 # Bind the Workers AI model catalog. Run machine learning models, powered by serverless GPUs, on Cloudflare’s global network
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#workers-ai
@@ -112,12 +122,6 @@ id = "0a2dc5df8dda441aa9a7b47a09411001"
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#queues
 # [[queues.consumers]]
 # queue = "my-queue"
-
-# Bind an R2 Bucket. Use R2 to store arbitrarily large blobs of data, such as files.
-# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#r2-buckets
-# [[r2_buckets]]
-# binding = "MY_BUCKET"
-# bucket_name = "my-bucket"
 
 # Bind another Worker service. Use this binding to call another Worker without network overhead.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
