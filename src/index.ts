@@ -165,7 +165,8 @@ export default {
 				}
 			
 				// Prepare a proper base URL for the HTML (must be absolute)
-				const baseUrl = `${reqUrl.protocol}//${reqUrl.host}${currentPathContext}`;
+				const originalHost = request.headers.get('X-Original-Host') || reqUrl.host;
+				const baseUrl = `${reqUrl.protocol}//${originalHost}${currentPathContext}`;
 				
 				// Add a base tag to help browser resolve relative URLs correctly
 				let modifiedHtml = text;
