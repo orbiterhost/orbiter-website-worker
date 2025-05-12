@@ -9,6 +9,14 @@ export interface Env {
 	SITE_PLANS: KVNamespace;
 	SITE_TO_ORG: KVNamespace;
 	RATE_LIMIT: KVNamespace;
+	REDIRECTS: KVNamespace;
+}
+
+interface Redirect {
+	source: string;
+	destination: string;
+	status: number;
+	force?: boolean;
 }
 
 export default {
@@ -38,7 +46,7 @@ export default {
 				let hashIp = '';
 
 				if (ip) {
-					hashIp = await getHashedIp(ip)
+					hashIp = await getHashedIp(ip);
 				}
 
 				// Non-blocking analytics
@@ -74,7 +82,71 @@ export default {
 			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || '0';
 
 			//	Get site CID and plan
-			let [siteCid, plan, contract] = await Promise.all([env.ORBITER_SITES.get(siteKey), env.SITE_PLANS.get(orgId), env.SITE_CONTRACT.get(siteKey)]);
+			let [siteCid, plan, contract] = await Promise.all([
+				env.ORBITER_SITES.get(siteKey),
+				env.SITE_PLANS.get(orgId),
+				env.SITE_CONTRACT.get(siteKey),
+			]);
+
+			let redirectsArray: Redirect[] = [];
+
+			if (plan !== 'free') {
+				console.log("Checking redirects");
+				// Grab the redirects file
+				const redirectsPlain = await env.REDIRECTS.get(siteKey);
+				if (redirectsPlain) {
+					redirectsArray = JSON.parse(redirectsPlain);
+					// Check if the current path matches any redirect rule
+					for (const redirect of redirectsArray) {
+						// Normalize paths for comparison
+						const sourcePath = redirect.source.startsWith('/') ? redirect.source : `/${redirect.source}`;
+						const currentPath = pathName;
+
+						// Skip if the current path matches the destination (already on the correct path)
+						let destinationPath = redirect.destination;
+						if (destinationPath.startsWith('http://') || destinationPath.startsWith('https://')) {
+							try {
+								// For absolute URLs, extract just the path
+								const destinationUrl = new URL(destinationPath);
+								destinationPath = destinationUrl.pathname + destinationUrl.search + destinationUrl.hash;
+							} catch (e) {
+								console.error('Invalid destination URL:', destinationPath);
+							}
+						} else if (!destinationPath.startsWith('/')) {
+							// Ensure relative paths start with /
+							destinationPath = `/${destinationPath}`;
+						}
+
+						// Skip this redirect if we're already on the destination path
+						if (currentPath === destinationPath) {
+							continue;
+						}
+
+						// Simple path matching (you can enhance this with regex if needed)
+						if (currentPath === sourcePath || (redirect.force && currentPath.startsWith(sourcePath))) {
+							// Construct the destination URL
+							let destinationUrl = redirect.destination;
+
+							// Handle relative vs absolute URLs in destination
+							if (!destinationUrl.startsWith('http://') && !destinationUrl.startsWith('https://')) {
+								destinationUrl = `${reqUrl.protocol}//${reqUrl.host}${destinationUrl.startsWith('/') ? '' : '/'}${destinationUrl}`;
+							}
+
+							// Return the redirect response
+							return new Response(null, {
+								status: redirect.status || 301,
+								headers: {
+									Location: destinationUrl,
+									'Cache-Control': 'public, max-age=3600',
+									'Powered-By': 'Orbiter',
+									'orb-cid': siteCid || '',
+									'orb-contract': contract || '',
+								},
+							});
+						}
+					}
+				}
+			}
 
 			const isUsingVersionCid = versionCid && (await pinata.gateways.containsCID(versionCid));
 			const cid = isUsingVersionCid ? versionCid : siteCid;
@@ -86,16 +158,16 @@ export default {
 			// Get base IPFS URL
 			let gatewayUrl = await pinata.gateways.convert(cid as string);
 			let response: Response | null = null;
-			
+
 			// IMPORTANT: Check if this is a relative path to the current page context
 			const refererUrl = referrer ? new URL(referrer) : null;
 			let cleanPath = pathName.startsWith('/') ? pathName.slice(1) : pathName;
-			
+
 			// For all asset requests that have a referrer, we need to consider the referrer's path context
 			if (refererUrl && refererUrl.pathname !== '/' && pathName !== '/') {
 				// Get only the directory part of the referrer path
 				let refererDir = refererUrl.pathname;
-				
+
 				// If the referrer path includes a file with extension, remove the file part
 				if (refererDir.includes('.') && !refererDir.endsWith('/')) {
 					refererDir = refererDir.substring(0, refererDir.lastIndexOf('/') + 1);
@@ -103,13 +175,13 @@ export default {
 					// Ensure directory paths end with a slash
 					refererDir = refererDir + '/';
 				}
-				
+
 				// For absolute paths in the request (starting with /), we use them as is
 				// For relative paths (no leading /), we need to resolve them against the referrer directory
 				if (!pathName.startsWith('/')) {
 					// First, trim the leading slash from the referrer directory
 					const trimmedRefererDir = refererDir.startsWith('/') ? refererDir.slice(1) : refererDir;
-					
+
 					// Combine the referrer directory with the requested path
 					cleanPath = `${trimmedRefererDir}${cleanPath}`;
 				}
@@ -150,7 +222,7 @@ export default {
 				// We need to modify all relative URLs to include the current path context
 				// First, properly format the current path context for base URL
 				let currentPathContext = pathName;
-				
+
 				// Make sure the path ends with a slash for directory contexts
 				if (!currentPathContext.endsWith('/') && !currentPathContext.includes('.')) {
 					currentPathContext += '/';
@@ -158,16 +230,16 @@ export default {
 					// For file paths, get just the directory part
 					currentPathContext = currentPathContext.substring(0, currentPathContext.lastIndexOf('/') + 1);
 				}
-				
+
 				// For the root path, use empty string as context
 				if (currentPathContext === '/') {
 					currentPathContext = '';
 				}
-			
+
 				// Prepare a proper base URL for the HTML (must be absolute)
 				const originalHost = request.headers.get('X-Original-Host') || reqUrl.host;
 				const baseUrl = `${reqUrl.protocol}//${originalHost}${currentPathContext}`;
-				
+
 				// Add a base tag to help browser resolve relative URLs correctly
 				let modifiedHtml = text;
 				if (!modifiedHtml.includes('<base ')) {
@@ -179,13 +251,13 @@ export default {
 						modifiedHtml = `<base href="${baseUrl}">\n${modifiedHtml}`;
 					}
 				}
-				
+
 				// IMPORTANT: We still want to process relative URLs in the HTML
 				// but instead of keeping them relative, we need to make them include
 				// the current path context explicitly
 				modifiedHtml = modifiedHtml.replace(/(src|href)=("|')(?!http|\/\/|data:|#|mailto:)([^"']*)("|')/g, (match, attr, quote, path) => {
 					let assetPath;
-					
+
 					// If path starts with /, it's already absolute from root
 					if (path.startsWith('/')) {
 						assetPath = path;
@@ -194,7 +266,7 @@ export default {
 						// This is the key fix - explicitly include the directory context
 						assetPath = currentPathContext + path;
 					}
-					
+
 					// Add the version CID to the URL if we're using one
 					const versionParam = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
 					return `${attr}=${quote}${assetPath}${versionParam}${quote}`;
@@ -211,9 +283,9 @@ export default {
 					'Content-Type': contentType || 'text/plain',
 					'Access-Control-Allow-Origin': '*',
 					'Cache-Control': 'public, max-age=3600',
-					'Powered-By': 'Orbiter', 
-					'orb-cid': cid || "", 
-					'orb-contract': contract || ""
+					'Powered-By': 'Orbiter',
+					'orb-cid': cid || '',
+					'orb-contract': contract || '',
 				},
 			});
 		} catch (error) {
