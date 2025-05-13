@@ -99,12 +99,12 @@ export default {
 					// Check if the current path matches any redirect rule
 					for (const redirect of redirectsArray) {
 						// Normalize paths for comparison
-						const sourcePath = redirect.source.startsWith('/') ? redirect.source : `/${redirect.source}`;
+						const sourcePath = redirect?.source?.startsWith('/') ? redirect?.source : `/${redirect?.source}`;
 						const currentPath = pathName;
 
 						// Skip if the current path matches the destination (already on the correct path)
-						let destinationPath = redirect.destination;
-						if (destinationPath.startsWith('http://') || destinationPath.startsWith('https://')) {
+						let destinationPath = redirect?.destination;
+						if (destinationPath && destinationPath?.startsWith('http://') || destinationPath?.startsWith('https://')) {
 							try {
 								// For absolute URLs, extract just the path
 								const destinationUrl = new URL(destinationPath);
@@ -112,7 +112,7 @@ export default {
 							} catch (e) {
 								console.error('Invalid destination URL:', destinationPath);
 							}
-						} else if (!destinationPath.startsWith('/')) {
+						} else if (!destinationPath?.startsWith('/')) {
 							// Ensure relative paths start with /
 							destinationPath = `/${destinationPath}`;
 						}
@@ -134,7 +134,7 @@ export default {
 
 							// Return the redirect response
 							return new Response(null, {
-								status: redirect.status || 301,
+								status: redirect?.status || 301,
 								headers: {
 									Location: destinationUrl,
 									'Cache-Control': 'public, max-age=3600',
