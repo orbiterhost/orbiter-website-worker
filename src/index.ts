@@ -94,7 +94,6 @@ export default {
 				console.log("Checking redirects");
 				// Grab the redirects file
 				const redirectsPlain = await env.REDIRECTS.get(siteKey);
-				console.log({redirectsPlain});
 				if (redirectsPlain) {
 					redirectsArray = JSON.parse(redirectsPlain);
 					// Check if the current path matches any redirect rule
