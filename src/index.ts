@@ -94,19 +94,24 @@ export default {
 
 			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || "0";
 
+			const siteCid = "bafybeibbeoqv4skbegjate3g7l2oslq7l35wfnmul5jzmdo5j7ylcvdyiq"
+			const plan = "orbit"
+			const contract = "contract"
+
 			//	Get site CID and plan
-			let [siteCid, plan, contract] = await Promise.all([
-				env.ORBITER_SITES.get(siteKey),
-				env.SITE_PLANS.get(orgId),
-				env.SITE_CONTRACT.get(siteKey),
-			]);
+			// let [siteCid, plan, contract] = await Promise.all([
+			// 	env.ORBITER_SITES.get(siteKey),
+			// 	env.SITE_PLANS.get(orgId),
+			// 	env.SITE_CONTRACT.get(siteKey),
+			// ]);
 
 			let redirectsArray: Redirect[] = [];
 
 			if (plan !== "free") {
 				console.log("Checking redirects");
 				// Grab the redirects file
-				const redirectsPlain = await env.REDIRECTS.get(siteKey);
+				//const redirectsPlain = await env.REDIRECTS.get(siteKey);
+				const redirectsPlain = `[{"source":"/invalid","destination":"/404","status":301,"force":false},{"source":"/pinata","destination":"https://pinata.cloud","status":301,"force":false},{"source":"404","destination":"/404","status":301,"force":false}]`
 				if (redirectsPlain) {
 					redirectsArray = JSON.parse(redirectsPlain);
 					// Check if the current path matches any redirect rule
@@ -253,7 +258,7 @@ export default {
 
 						// Try to fetch the custom 404 page
 						const notFoundResponse = await fetch(
-							`${gatewayUrl}/${notFoundPath}`,
+							`${gatewayUrl}/${notFoundPath}.html`,
 						);
 
 						if (notFoundResponse.ok) {
