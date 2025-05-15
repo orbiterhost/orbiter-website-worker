@@ -108,6 +108,8 @@ export default {
 			let redirectsArray: Redirect[] = [];
 
 			if (plan !== "free") {
+				const originalHost =
+					request.headers.get("X-Original-Host") || reqUrl.host;
 				console.log("Checking redirects");
 				// Grab the redirects file
 				const redirectsPlain = await env.REDIRECTS.get(siteKey);
@@ -161,7 +163,7 @@ export default {
 								!destinationUrl.startsWith("http://") &&
 								!destinationUrl.startsWith("https://")
 							) {
-								destinationUrl = `${reqUrl.protocol}//${reqUrl.host}${destinationUrl.startsWith("/") ? "" : "/"}${destinationUrl}`;
+								destinationUrl = `${reqUrl.protocol}//${originalHost}${destinationUrl.startsWith("/") ? "" : "/"}${destinationUrl}`;
 							}
 
 							// Return the redirect response
