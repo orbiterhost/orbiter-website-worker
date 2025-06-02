@@ -24,6 +24,101 @@ interface Redirect {
 	force?: boolean;
 }
 
+// Helper function to parse Range header
+function parseRangeHeader(rangeHeader: string, contentLength: number): { start: number; end: number } | null {
+	const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+	if (!match) return null;
+
+	const start = parseInt(match[1], 10);
+	const end = match[2] ? parseInt(match[2], 10) : contentLength - 1;
+
+	// Validate range
+	if (start >= contentLength || end >= contentLength || start > end) {
+		return null;
+	}
+
+	return { start, end };
+}
+
+// Helper function to handle range requests for media files
+async function handleRangeRequest(
+	gatewayUrl: string,
+	cleanPath: string,
+	rangeHeader: string,
+	cid: string,
+	contract: string
+): Promise<Response> {
+	// First, get the full file to determine its size
+	const headResponse = await fetch(`${gatewayUrl}/${cleanPath}`, { method: 'HEAD' });
+	if (!headResponse.ok) {
+		return new Response('File not found', { status: 404 });
+	}
+
+	const contentLength = parseInt(headResponse.headers.get('Content-Length') || '0', 10);
+	if (!contentLength) {
+		// If we can't determine content length, fall back to full response
+		const fullResponse = await fetch(`${gatewayUrl}/${cleanPath}`);
+		return new Response(fullResponse.body, {
+			status: 200,
+			headers: {
+				'Content-Type': fullResponse.headers.get('Content-Type') || 'application/octet-stream',
+				'Content-Length': fullResponse.headers.get('Content-Length') || '0',
+				'Accept-Ranges': 'bytes',
+				'Cache-Control': 'public, max-age=3600',
+				'Powered-By': 'Orbiter',
+				'orb-cid': cid || '',
+				'orb-contract': contract || '',
+			},
+		});
+	}
+
+	const range = parseRangeHeader(rangeHeader, contentLength);
+	if (!range) {
+		return new Response('Invalid range', { status: 416 });
+	}
+
+	// Fetch the specific byte range
+	const rangeResponse = await fetch(`${gatewayUrl}/${cleanPath}`, {
+		headers: {
+			'Range': `bytes=${range.start}-${range.end}`
+		}
+	});
+
+	if (!rangeResponse.ok) {
+		// If range request fails, try without range
+		const fullResponse = await fetch(`${gatewayUrl}/${cleanPath}`);
+		return new Response(fullResponse.body, {
+			status: 200,
+			headers: {
+				'Content-Type': fullResponse.headers.get('Content-Type') || 'application/octet-stream',
+				'Content-Length': contentLength.toString(),
+				'Accept-Ranges': 'bytes',
+				'Cache-Control': 'public, max-age=3600',
+				'Powered-By': 'Orbiter',
+				'orb-cid': cid || '',
+				'orb-contract': contract || '',
+			},
+		});
+	}
+
+	const contentRange = `bytes ${range.start}-${range.end}/${contentLength}`;
+	const partialContentLength = range.end - range.start + 1;
+
+	return new Response(rangeResponse.body, {
+		status: 206,
+		headers: {
+			'Content-Type': rangeResponse.headers.get('Content-Type') || 'application/octet-stream',
+			'Content-Length': partialContentLength.toString(),
+			'Content-Range': contentRange,
+			'Accept-Ranges': 'bytes',
+			'Cache-Control': 'public, max-age=3600',
+			'Powered-By': 'Orbiter',
+			'orb-cid': cid || '',
+			'orb-contract': contract || '',
+		},
+	});
+}
+
 export default {
 	async fetch(
 		request: Request,
@@ -99,11 +194,15 @@ export default {
 			// const contract = "contract"
 
 			//	Get site CID and plan
-			let [siteCid, plan, contract] = await Promise.all([
-				env.ORBITER_SITES.get(siteKey),
-				env.SITE_PLANS.get(orgId),
-				env.SITE_CONTRACT.get(siteKey),
-			]);
+			// let [siteCid, plan, contract] = await Promise.all([
+			// 	env.ORBITER_SITES.get(siteKey),
+			// 	env.SITE_PLANS.get(orgId),
+			// 	env.SITE_CONTRACT.get(siteKey),
+			// ]);
+
+			let plan = "orbit"
+			let contract = "0x"
+			let siteCid = "bafybeie2chscyvn2llxhl2l4aftmop2cvqqjmznvbwedytvi4wiyw2xrva"
 
 			let redirectsArray: Redirect[] = [];
 
@@ -225,6 +324,8 @@ export default {
 			}
 
 			if (pathName && pathName !== "/") {
+				const rangeHeader = request.headers.get('Range');
+				
 				if (!cleanPath.includes(".")) {
 					// First, try fetching index.html from the directory
 					const indexPath = `${gatewayUrl}/${cleanPath}/index.html`;
@@ -236,8 +337,16 @@ export default {
 						response = await fetch(htmlPath);
 					}
 				} else {
-					// Path includes an extension, fetch directly
-					response = await fetch(`${gatewayUrl}/${cleanPath}`);
+					// Path includes an extension - check if it's a video/media file and has range header
+					const isMediaFile = cleanPath.match(/\.(mp4|webm|ogg|mov|avi|mkv|mp3|wav|flac|aac|m4a)$/i);
+					
+					if (isMediaFile && rangeHeader) {
+						// Handle range request for media files
+						return await handleRangeRequest(gatewayUrl, cleanPath, rangeHeader, cid as string, contract || '');
+					} else {
+						// Regular file request
+						response = await fetch(`${gatewayUrl}/${cleanPath}`);
+					}
 				}
 			} else {
 				// Root path, fetch index.html
@@ -362,18 +471,28 @@ export default {
 				body = modifiedHtml;
 			}
 
+			// Check if this is a media file to add Accept-Ranges header
+			const isMediaFile = cleanPath.match(/\.(mp4|webm|ogg|mov|avi|mkv|mp3|wav|flac|aac|m4a)$/i);
+			
+			const responseHeaders: Record<string, string> = {
+				"Content-Type": contentType || "text/plain",
+				"Access-Control-Allow-Origin": "*",
+				"Cache-Control": "public, max-age=3600",
+				"Powered-By": "Orbiter",
+				"orb-cid": cid || "",
+				"orb-contract": contract || "",
+			};
+
+			// Add Accept-Ranges header for media files to enable seeking
+			if (isMediaFile) {
+				responseHeaders["Accept-Ranges"] = "bytes";
+			}
+
 			// Create response with appropriate headers
 			return new Response(body, {
 				status: response.status,
 				statusText: response.statusText,
-				headers: {
-					"Content-Type": contentType || "text/plain",
-					"Access-Control-Allow-Origin": "*",
-					"Cache-Control": "public, max-age=3600",
-					"Powered-By": "Orbiter",
-					"orb-cid": cid || "",
-					"orb-contract": contract || "",
-				},
+				headers: responseHeaders,
 			});
 		} catch (error) {
 			console.error("Error:", error);
