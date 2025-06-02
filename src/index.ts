@@ -99,11 +99,14 @@ export default {
 			// const contract = "contract"
 
 			//	Get site CID and plan
-			let [siteCid, plan, contract] = await Promise.all([
-				env.ORBITER_SITES.get(siteKey),
-				env.SITE_PLANS.get(orgId),
-				env.SITE_CONTRACT.get(siteKey),
-			]);
+			// let [siteCid, plan, contract] = await Promise.all([
+			// 	env.ORBITER_SITES.get(siteKey),
+			// 	env.SITE_PLANS.get(orgId),
+			// 	env.SITE_CONTRACT.get(siteKey),
+			// ]);
+			let siteCid = "bafybeie2chscyvn2llxhl2l4aftmop2cvqqjmznvbwedytvi4wiyw2xrva"
+			let plan = "orbit"
+			let contract = "0x"
 
 			let redirectsArray: Redirect[] = [];
 
