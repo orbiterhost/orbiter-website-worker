@@ -133,9 +133,11 @@ async function handleRangeRequest(
 async function handleApiRequest(request: Request, env: Env, siteKey: string): Promise<Response | null> {
 	// Look up the customer's API worker for this site
 	const workerKey = `worker:${siteKey}`; // Single API worker per site
+	console.log({workerKey})
 	const workerData = await env.FUNCTIONS.get(workerKey);
 
 	if (!workerData) {
+		console.log("NO WORKER DATA")
 		// No API worker deployed for this site
 		return new Response(
 			JSON.stringify({
@@ -265,6 +267,7 @@ export default {
 
 			// NEW: Check if this is an API request
 			if (pathName.startsWith('/_api/')) {
+				console.log("API REQUEST");
 				return (await handleApiRequest(request, env, siteKey)) || new Response(null);
 			}
 
