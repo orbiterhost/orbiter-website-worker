@@ -133,11 +133,11 @@ async function handleRangeRequest(
 async function handleApiRequest(request: Request, env: Env, siteKey: string): Promise<Response | null> {
 	// Look up the customer's API worker for this site
 	const workerKey = `worker:${siteKey}`; // Single API worker per site
-	console.log({workerKey})
+	console.log({ workerKey });
 	const workerData = await env.FUNCTIONS.get(workerKey);
 
 	if (!workerData) {
-		console.log("NO WORKER DATA")
+		console.log('NO WORKER DATA');
 		// No API worker deployed for this site
 		return new Response(
 			JSON.stringify({
@@ -265,9 +265,21 @@ export default {
 
 			let siteKey = hostname.endsWith('orbiter.website') ? hostname.split('.')[0] : hostname;
 
+			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
+			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || '0';
+
+			// Your existing static site logic continues here...
+			// let siteCid = "bafybeie2chscyvn2llxhl2l4aftmop2cvqqjmznvbwedytvi4wiyw2xrva"
+			// let plan = "orbit"
+			// let contract = "0x"
+			let [siteCid, plan, contract] = await Promise.all([
+				env.ORBITER_SITES.get(siteKey),
+				env.SITE_PLANS.get(orgId),
+				env.SITE_CONTRACT.get(siteKey),
+			]);
+
 			// NEW: Check if this is an API request
-			if (pathName.startsWith('/_api/')) {
-				console.log("API REQUEST");
+			if (pathName.startsWith('/_api/') && plan !== 'free') {
 				return (await handleApiRequest(request, env, siteKey)) || new Response(null);
 			}
 
@@ -301,19 +313,6 @@ export default {
 					ipAddress: hashIp || '',
 				}).catch((error) => console.error('Analytics failed:', error));
 			}
-
-			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
-			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || '0';
-
-			// Your existing static site logic continues here...
-			// let siteCid = "bafybeie2chscyvn2llxhl2l4aftmop2cvqqjmznvbwedytvi4wiyw2xrva"
-			// let plan = "orbit"
-			// let contract = "0x"
-			let [siteCid, plan, contract] = await Promise.all([
-				env.ORBITER_SITES.get(siteKey),
-				env.SITE_PLANS.get(orgId),
-				env.SITE_CONTRACT.get(siteKey),
-			]);
 
 			let redirectsArray: Redirect[] = [];
 
