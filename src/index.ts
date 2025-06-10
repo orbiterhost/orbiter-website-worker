@@ -160,11 +160,11 @@ async function handleApiRequest(request: Request, env: Env, siteKey: string): Pr
 		// Get the worker from the dispatch namespace
 		const worker = env.dispatcher.get(workerInfo.deployedName);
 
-		// Create a new request with /_api stripped from the path
-		// So /_api/contact becomes /contact for the customer's worker
+		// Create a new request with /api stripped from the path
+		// So /api/contact becomes /contact for the customer's worker
 		const url = new URL(request.url);
 		const hostname = url.hostname;
-		const apiPath = url.pathname.substring(5); // Remove '/_api'
+		const apiPath = url.pathname.substring(5); // Remove '/api'
 		const newUrl = new URL(apiPath || '/', url.origin);
 		newUrl.search = url.search; // Preserve query parameters
 
@@ -279,7 +279,7 @@ export default {
 			]);
 
 			// NEW: Check if this is an API request
-			if (pathName.startsWith('/_api/') && plan !== 'free') {
+			if (pathName.startsWith('/api/') && plan !== 'free') {
 				return (await handleApiRequest(request, env, siteKey)) || new Response(null);
 			}
 
