@@ -26,6 +26,8 @@ head_sampling_rate = 0.50 # 1% sampling rate
 [vars]
 PINATA_GATEWAY = "cdn.orbiter.host"
 CHANNEL_ID = "C086DDCVA5R"
+DISPATCH_NAMESPACE_NAME = "staging-functions"
+CLOUDFLARE_ACCOUNT_ID = "255e21419f5795400879e86a02167322"
 
 # Bind a KV Namespace. Use KV as persistent storage for small key-value pairs.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#kv-namespaces
@@ -53,6 +55,10 @@ id = "0a2dc5df8dda441aa9a7b47a09411001"
 binding = "REDIRECTS"
 id = "5a55237f2b0646599e637edb8f4154c7"
 
+[[kv_namespaces]]
+binding = "FUNCTIONS"
+id = "fdf47ff1bd0442b99bd79d849f7d1824"
+
 # Bind the Workers AI model catalog. Run machine learning models, powered by serverless GPUs, on Cloudflare’s global network
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#workers-ai
 # [ai]
@@ -77,9 +83,9 @@ id = "5a55237f2b0646599e637edb8f4154c7"
 
 # Bind a dispatch namespace. Use Workers for Platforms to deploy serverless functions programmatically on behalf of your customers.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#dispatch-namespace-bindings-workers-for-platforms
-# [[dispatch_namespaces]]
-# binding = "MY_DISPATCHER"
-# namespace = "my-namespace"
+[[dispatch_namespaces]]
+binding = "dispatcher"
+namespace = "staging-functions"
 
 # Bind a Durable Object. Durable objects are a scale-to-zero compute primitive based on the actor model.
 # Durable Objects can live for as long as needed. Use these when you need a long-running "server", such as in realtime apps.

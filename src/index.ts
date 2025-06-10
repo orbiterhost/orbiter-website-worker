@@ -1,10 +1,5 @@
-import { PinataSDK } from "pinata-web3";
-import {
-	classifyRequest,
-	getHashedIp,
-	getNormalizedReferrer,
-	trackPageView,
-} from "./utils/analytics";
+import { PinataSDK } from 'pinata-web3';
+import { classifyRequest, getHashedIp, getNormalizedReferrer, trackPageView } from './utils/analytics';
 
 export interface Env {
 	ALCHEMY_URL: string;
@@ -15,6 +10,25 @@ export interface Env {
 	SITE_TO_ORG: KVNamespace;
 	RATE_LIMIT: KVNamespace;
 	REDIRECTS: KVNamespace;
+
+	// Add dispatcher binding for API requests
+	dispatcher: Dispatcher;
+	FUNCTIONS: KVNamespace; // For looking up customer workers
+}
+
+interface Dispatcher {
+	get: (
+		scriptName: string,
+		args?: { init?: RequestInit },
+		getOptions?: {
+			limits?: { cpuMs?: number; memory?: number };
+			outbound?: string;
+		}
+	) => Worker;
+}
+
+interface Worker {
+	fetch: (request: Request) => Promise<Response>;
 }
 
 interface Redirect {
@@ -32,7 +46,6 @@ function parseRangeHeader(rangeHeader: string, contentLength: number): { start: 
 	const start = parseInt(match[1], 10);
 	const end = match[2] ? parseInt(match[2], 10) : contentLength - 1;
 
-	// Validate range
 	if (start >= contentLength || end >= contentLength || start > end) {
 		return null;
 	}
@@ -48,7 +61,7 @@ async function handleRangeRequest(
 	cid: string,
 	contract: string
 ): Promise<Response> {
-	// First, get the full file to determine its size
+	// ... your existing range request logic
 	const headResponse = await fetch(`${gatewayUrl}/${cleanPath}`, { method: 'HEAD' });
 	if (!headResponse.ok) {
 		return new Response('File not found', { status: 404 });
@@ -56,7 +69,6 @@ async function handleRangeRequest(
 
 	const contentLength = parseInt(headResponse.headers.get('Content-Length') || '0', 10);
 	if (!contentLength) {
-		// If we can't determine content length, fall back to full response
 		const fullResponse = await fetch(`${gatewayUrl}/${cleanPath}`);
 		return new Response(fullResponse.body, {
 			status: 200,
@@ -77,15 +89,13 @@ async function handleRangeRequest(
 		return new Response('Invalid range', { status: 416 });
 	}
 
-	// Fetch the specific byte range
 	const rangeResponse = await fetch(`${gatewayUrl}/${cleanPath}`, {
 		headers: {
-			'Range': `bytes=${range.start}-${range.end}`
-		}
+			Range: `bytes=${range.start}-${range.end}`,
+		},
 	});
 
 	if (!rangeResponse.ok) {
-		// If range request fails, try without range
 		const fullResponse = await fetch(`${gatewayUrl}/${cleanPath}`);
 		return new Response(fullResponse.body, {
 			status: 200,
@@ -119,160 +129,235 @@ async function handleRangeRequest(
 	});
 }
 
+// NEW: Handle API requests by proxying to customer worker
+async function handleApiRequest(request: Request, env: Env, siteKey: string): Promise<Response | null> {
+	// Look up the customer's API worker for this site
+	const workerKey = `worker:${siteKey}`; // Single API worker per site
+	console.log({ workerKey });
+	const workerData = await env.FUNCTIONS.get(workerKey);
+
+	if (!workerData) {
+		console.log('NO WORKER DATA');
+		// No API worker deployed for this site
+		return new Response(
+			JSON.stringify({
+				error: 'API not available',
+				message: 'No API worker deployed for this site',
+			}),
+			{
+				status: 404,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*',
+				},
+			}
+		);
+	}
+
+	try {
+		const workerInfo = JSON.parse(workerData);
+
+		// Get the worker from the dispatch namespace
+		const worker = env.dispatcher.get(workerInfo.deployedName);
+
+		// Create a new request with /api stripped from the path
+		// So /api/contact becomes /contact for the customer's worker
+		const url = new URL(request.url);
+		const hostname = url.hostname;
+		const apiPath = url.pathname.substring(5); // Remove '/api'
+		const newUrl = new URL(apiPath || '/', url.origin);
+		newUrl.search = url.search; // Preserve query parameters
+
+		const apiRequest = new Request(newUrl.toString(), {
+			method: request.method,
+			headers: request.headers,
+			body: request.body,
+		});
+
+		// Forward the request to the customer's worker
+		const response = await worker.fetch(apiRequest);
+
+		// Add CORS headers to the response
+		const corsHeaders = {
+			'Access-Control-Allow-Origin': '*',
+			'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+			'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+		};
+
+		// Handle OPTIONS requests for CORS
+		if (request.method === 'OPTIONS') {
+			return new Response(null, {
+				status: 200,
+				headers: corsHeaders,
+			});
+		}
+
+		// Clone response and add CORS headers
+		const responseWithCors = new Response(response.body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers: {
+				...Object.fromEntries(response.headers.entries()),
+				...corsHeaders,
+				'Powered-By': 'Orbiter API',
+			},
+		});
+
+		return responseWithCors;
+	} catch (error) {
+		console.error('API worker execution error:', error);
+
+		if (error instanceof Error && error.message.includes('Worker not found')) {
+			return new Response(
+				JSON.stringify({
+					error: 'API worker not found',
+					message: 'The API worker has been deleted or is not deployed',
+				}),
+				{
+					status: 404,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*',
+					},
+				}
+			);
+		}
+
+		return new Response(
+			JSON.stringify({
+				error: 'API error',
+				message: 'Internal server error',
+			}),
+			{
+				status: 500,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*',
+				},
+			}
+		);
+	}
+}
+
 export default {
-	async fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext,
-	): Promise<Response> {
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const pinata = new PinataSDK({
-			pinataJwt: "",
+			pinataJwt: '',
 			pinataGateway: env.PINATA_GATEWAY,
 		});
 
 		try {
 			const reqUrl = new URL(request.url);
-			const referrer = request.headers.get("referer");
-			let classification;
-
-			try {
-				classification = classifyRequest(request, reqUrl.pathname);
-			} catch (error) {
-				console.error("Classification failed:", error);
-				classification = { isBot: true, isAsset: false, shouldTrack: false };
-			}
-
-			if (classification.shouldTrack) {
-				const referer = request.headers.get("referer");
-				const normalizedReferer = referer
-					? getNormalizedReferrer(referer)
-					: "direct";
-
-				const ip = request.headers.get("x-forwarded-for");
-				let hashIp = "";
-
-				if (ip) {
-					hashIp = await getHashedIp(ip);
-				}
-
-				// Non-blocking analytics
-				trackPageView(env, {
-					siteId: reqUrl.hostname,
-					path: reqUrl.pathname,
-					userAgent: request.headers.get("user-agent") || "",
-					country: request.headers.get("cf-ipcountry") || "",
-					city: request.headers.get("cf-ipcity") || "",
-					referrer: normalizedReferer,
-					ipAddress: hashIp || "",
-				}).catch((error) => console.error("Analytics failed:", error));
-			}
-
-			const versionCid = reqUrl.searchParams.get("orbiterVersionCid");
-
+			const referrer = request.headers.get('referer');
 			const pathName = reqUrl.pathname;
 			const hostname = reqUrl.hostname;
 
 			// Block PHP file requests early
-			if (pathName.toLowerCase().endsWith(".php")) {
-				return new Response("Not Found", {
+			if (pathName.toLowerCase().endsWith('.php')) {
+				return new Response('Not Found', {
 					status: 404,
 					headers: {
-						"Content-Type": "text/plain",
-						"Cache-Control": "public, max-age=86400", // Cache for 24 hours
+						'Content-Type': 'text/plain',
+						'Cache-Control': 'public, max-age=86400',
 					},
 				});
 			}
 
-			let siteKey = hostname.endsWith("orbiter.website")
-				? hostname.split(".")[0]
-				: hostname;
+			let siteKey = hostname.endsWith('orbiter.website') ? hostname.split('.')[0] : hostname;
 
-			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || "0";
+			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
+			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || '0';
 
-			// const siteCid = "bafybeibbeoqv4skbegjate3g7l2oslq7l35wfnmul5jzmdo5j7ylcvdyiq"
-			// const plan = "orbit"
-			// const contract = "contract"
-
-			//	Get site CID and plan
+			// Your existing static site logic continues here...
+			// let siteCid = "bafybeie2chscyvn2llxhl2l4aftmop2cvqqjmznvbwedytvi4wiyw2xrva"
+			// let plan = "orbit"
+			// let contract = "0x"
 			let [siteCid, plan, contract] = await Promise.all([
 				env.ORBITER_SITES.get(siteKey),
 				env.SITE_PLANS.get(orgId),
 				env.SITE_CONTRACT.get(siteKey),
 			]);
-			// let siteCid = "bafybeie2chscyvn2llxhl2l4aftmop2cvqqjmznvbwedytvi4wiyw2xrva"
-			// let plan = "orbit"
-			// let contract = "0x"
+
+			// NEW: Check if this is an API request
+			if (pathName.startsWith('/api/') && plan !== 'free') {
+				return (await handleApiRequest(request, env, siteKey)) || new Response(null);
+			}
+
+			// Continue with your existing static site logic...
+			let classification;
+			try {
+				classification = classifyRequest(request, reqUrl.pathname);
+			} catch (error) {
+				console.error('Classification failed:', error);
+				classification = { isBot: true, isAsset: false, shouldTrack: false };
+			}
+
+			if (classification.shouldTrack) {
+				const referer = request.headers.get('referer');
+				const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
+
+				const ip = request.headers.get('x-forwarded-for');
+				let hashIp = '';
+
+				if (ip) {
+					hashIp = await getHashedIp(ip);
+				}
+
+				trackPageView(env, {
+					siteId: reqUrl.hostname,
+					path: reqUrl.pathname,
+					userAgent: request.headers.get('user-agent') || '',
+					country: request.headers.get('cf-ipcountry') || '',
+					city: request.headers.get('cf-ipcity') || '',
+					referrer: normalizedReferer,
+					ipAddress: hashIp || '',
+				}).catch((error) => console.error('Analytics failed:', error));
+			}
 
 			let redirectsArray: Redirect[] = [];
 
-			if (plan !== "free") {
-				const originalHost =
-					request.headers.get("X-Original-Host") || reqUrl.host;
-				console.log("Checking redirects");
-				// Grab the redirects file
+			if (plan !== 'free') {
+				const originalHost = request.headers.get('X-Original-Host') || reqUrl.host;
+				console.log('Checking redirects');
 				const redirectsPlain = await env.REDIRECTS.get(siteKey);
-				// const redirectsPlain = `[{"source":"/invalid","destination":"/404","status":301,"force":false},{"source":"/pinata","destination":"https://pinata.cloud","status":301,"force":false},{"source":"404","destination":"/404","status":301,"force":false}]`
+
 				if (redirectsPlain) {
 					redirectsArray = JSON.parse(redirectsPlain);
-					// Check if the current path matches any redirect rule
 					for (const redirect of redirectsArray) {
-						// Normalize paths for comparison
-						const sourcePath = redirect?.source?.startsWith("/")
-							? redirect?.source
-							: `/${redirect?.source}`;
+						const sourcePath = redirect?.source?.startsWith('/') ? redirect?.source : `/${redirect?.source}`;
 						const currentPath = pathName;
 
-						// Skip if the current path matches the destination (already on the correct path)
 						let destinationPath = redirect?.destination;
-						if (
-							(destinationPath && destinationPath?.startsWith("http://")) ||
-							destinationPath?.startsWith("https://")
-						) {
+						if ((destinationPath && destinationPath?.startsWith('http://')) || destinationPath?.startsWith('https://')) {
 							try {
-								// For absolute URLs, extract just the path
 								const destinationUrl = new URL(destinationPath);
-								destinationPath =
-									destinationUrl.pathname +
-									destinationUrl.search +
-									destinationUrl.hash;
+								destinationPath = destinationUrl.pathname + destinationUrl.search + destinationUrl.hash;
 							} catch (e) {
-								console.error("Invalid destination URL:", destinationPath);
+								console.error('Invalid destination URL:', destinationPath);
 							}
-						} else if (!destinationPath?.startsWith("/")) {
-							// Ensure relative paths start with /
+						} else if (!destinationPath?.startsWith('/')) {
 							destinationPath = `/${destinationPath}`;
 						}
 
-						// Skip this redirect if we're already on the destination path
 						if (currentPath === destinationPath) {
 							continue;
 						}
 
-						// Simple path matching (you can enhance this with regex if needed)
-						if (
-							currentPath === sourcePath ||
-							(redirect.force && currentPath.startsWith(sourcePath))
-						) {
-							// Construct the destination URL
+						if (currentPath === sourcePath || (redirect.force && currentPath.startsWith(sourcePath))) {
 							let destinationUrl = redirect.destination;
 
-							// Handle relative vs absolute URLs in destination
-							if (
-								!destinationUrl.startsWith("http://") &&
-								!destinationUrl.startsWith("https://")
-							) {
-								destinationUrl = `${reqUrl.protocol}//${originalHost}${destinationUrl.startsWith("/") ? "" : "/"}${destinationUrl}`;
+							if (!destinationUrl.startsWith('http://') && !destinationUrl.startsWith('https://')) {
+								destinationUrl = `${reqUrl.protocol}//${originalHost}${destinationUrl.startsWith('/') ? '' : '/'}${destinationUrl}`;
 							}
 
-							// Return the redirect response
 							return new Response(null, {
 								status: redirect?.status || 301,
 								headers: {
 									Location: destinationUrl,
-									"Cache-Control": "public, max-age=3600",
-									"Powered-By": "Orbiter",
-									"orb-cid": siteCid || "",
-									"orb-contract": contract || "",
+									'Cache-Control': 'public, max-age=3600',
+									'Powered-By': 'Orbiter',
+									'orb-cid': siteCid || '',
+									'orb-contract': contract || '',
 								},
 							});
 						}
@@ -280,224 +365,161 @@ export default {
 				}
 			}
 
-			const isUsingVersionCid =
-				versionCid && (await pinata.gateways.containsCID(versionCid));
+			// Rest of your existing static site logic...
+			const isUsingVersionCid = versionCid && (await pinata.gateways.containsCID(versionCid));
 			const cid = isUsingVersionCid ? versionCid : siteCid;
 
 			if (!cid) {
 				throw new Error(`Failed to fetch latest state: ${cid}`);
 			}
 
-			// Get base IPFS URL
 			let gatewayUrl = await pinata.gateways.convert(cid as string);
 			let response: Response | null = null;
 
-			// IMPORTANT: Check if this is a relative path to the current page context
 			const refererUrl = referrer ? new URL(referrer) : null;
-			let cleanPath = pathName.startsWith("/") ? pathName.slice(1) : pathName;
+			let cleanPath = pathName.startsWith('/') ? pathName.slice(1) : pathName;
 
-			// For all asset requests that have a referrer, we need to consider the referrer's path context
-			if (refererUrl && refererUrl.pathname !== "/" && pathName !== "/") {
-				// Get only the directory part of the referrer path
+			if (refererUrl && refererUrl.pathname !== '/' && pathName !== '/') {
 				let refererDir = refererUrl.pathname;
 
-				// If the referrer path includes a file with extension, remove the file part
-				if (refererDir.includes(".") && !refererDir.endsWith("/")) {
-					refererDir = refererDir.substring(0, refererDir.lastIndexOf("/") + 1);
-				} else if (!refererDir.endsWith("/")) {
-					// Ensure directory paths end with a slash
-					refererDir = refererDir + "/";
+				if (refererDir.includes('.') && !refererDir.endsWith('/')) {
+					refererDir = refererDir.substring(0, refererDir.lastIndexOf('/') + 1);
+				} else if (!refererDir.endsWith('/')) {
+					refererDir = refererDir + '/';
 				}
 
-				// For absolute paths in the request (starting with /), we use them as is
-				// For relative paths (no leading /), we need to resolve them against the referrer directory
-				if (!pathName.startsWith("/")) {
-					// First, trim the leading slash from the referrer directory
-					const trimmedRefererDir = refererDir.startsWith("/")
-						? refererDir.slice(1)
-						: refererDir;
+				if (!pathName.startsWith('/')) {
+					const trimmedRefererDir = refererDir.startsWith('/') ? refererDir.slice(1) : refererDir;
 
-					// Combine the referrer directory with the requested path
 					cleanPath = `${trimmedRefererDir}${cleanPath}`;
 				}
 			}
 
-			if (pathName && pathName !== "/") {
+			if (pathName && pathName !== '/') {
 				const rangeHeader = request.headers.get('Range');
-				
-				if (!cleanPath.includes(".")) {
-					// First, try fetching index.html from the directory
+
+				if (!cleanPath.includes('.')) {
 					const indexPath = `${gatewayUrl}/${cleanPath}/index.html`;
 					response = await fetch(indexPath);
 
-					// If that fails, try appending .html to the path
 					if (!response.ok) {
 						const htmlPath = `${gatewayUrl}/${cleanPath}.html`;
 						response = await fetch(htmlPath);
 					}
 				} else {
-					// Path includes an extension - check if it's a video/media file and has range header
 					const isMediaFile = cleanPath.match(/\.(mp4|webm|ogg|mov|avi|mkv|mp3|wav|flac|aac|m4a)$/i);
-					
+
 					if (isMediaFile && rangeHeader) {
-						// Handle range request for media files
 						return await handleRangeRequest(gatewayUrl, cleanPath, rangeHeader, cid as string, contract || '');
 					} else {
-						// Regular file request
 						response = await fetch(`${gatewayUrl}/${cleanPath}`);
 					}
 				}
 			} else {
-				// Root path, fetch index.html
 				response = await fetch(`${gatewayUrl}/index.html`);
 			}
 
 			if (!response?.ok) {
-				// Check if a custom 404 page is defined in redirects
 				if (redirectsArray.length > 0) {
-					const custom404 = redirectsArray.find(
-						(redirect) => redirect.source === "404",
-					);
+					const custom404 = redirectsArray.find((redirect) => redirect.source === '404');
 
 					if (custom404) {
-						console.log("Using custom 404 page");
-						// Get the 404 page path, ensuring it starts with /
-						const notFoundPath = custom404.destination.startsWith("/")
-							? custom404.destination.slice(1)
-							: custom404.destination;
+						console.log('Using custom 404 page');
+						const notFoundPath = custom404.destination.startsWith('/') ? custom404.destination.slice(1) : custom404.destination;
 
-						// Try to fetch the custom 404 page
-						const notFoundResponse = await fetch(
-							`${gatewayUrl}/${notFoundPath}.html`,
-						);
+						const notFoundResponse = await fetch(`${gatewayUrl}/${notFoundPath}.html`);
 
 						if (notFoundResponse.ok) {
-							// Return the custom 404 page with proper status code
-							const contentType =
-								notFoundResponse.headers.get("Content-Type") || "text/html";
+							const contentType = notFoundResponse.headers.get('Content-Type') || 'text/html';
 							return new Response(notFoundResponse.body, {
-								status: 404, // Always use 404 status
+								status: 404,
 								headers: {
-									"Content-Type": contentType,
-									"Cache-Control": "public, max-age=3600",
-									"Powered-By": "Orbiter",
-									"orb-cid": cid || "",
-									"orb-contract": contract || "",
+									'Content-Type': contentType,
+									'Cache-Control': 'public, max-age=3600',
+									'Powered-By': 'Orbiter',
+									'orb-cid': cid || '',
+									'orb-contract': contract || '',
 								},
 							});
 						}
 					}
 				}
 
-				console.log("All failed final check");
-				gatewayUrl = gatewayUrl.split("/index.html")[0];
+				console.log('All failed final check');
+				gatewayUrl = gatewayUrl.split('/index.html')[0];
 				response = await fetch(gatewayUrl);
 			}
 
-			const contentType = response.headers.get("Content-Type") || "text/html";
+			const contentType = response.headers.get('Content-Type') || 'text/html';
 			let body: any = response.body;
-			// If this is an HTML file, we need to rewrite any asset URLs
-			if (contentType?.includes("text/html")) {
+
+			if (contentType?.includes('text/html')) {
 				const text = await response.text();
-				// We need to modify all relative URLs to include the current path context
-				// First, properly format the current path context for base URL
 				let currentPathContext = pathName;
 
-				// Make sure the path ends with a slash for directory contexts
-				if (
-					!currentPathContext.endsWith("/") &&
-					!currentPathContext.includes(".")
-				) {
-					currentPathContext += "/";
-				} else if (currentPathContext.includes(".")) {
-					// For file paths, get just the directory part
-					currentPathContext = currentPathContext.substring(
-						0,
-						currentPathContext.lastIndexOf("/") + 1,
-					);
+				if (!currentPathContext.endsWith('/') && !currentPathContext.includes('.')) {
+					currentPathContext += '/';
+				} else if (currentPathContext.includes('.')) {
+					currentPathContext = currentPathContext.substring(0, currentPathContext.lastIndexOf('/') + 1);
 				}
 
-				// For the root path, use empty string as context
-				if (currentPathContext === "/") {
-					currentPathContext = "";
+				if (currentPathContext === '/') {
+					currentPathContext = '';
 				}
 
-				// Prepare a proper base URL for the HTML (must be absolute)
-				const originalHost =
-					request.headers.get("X-Original-Host") || reqUrl.host;
+				const originalHost = request.headers.get('X-Original-Host') || reqUrl.host;
 				const baseUrl = `${reqUrl.protocol}//${originalHost}${currentPathContext}`;
 
-				// Add a base tag to help browser resolve relative URLs correctly
 				let modifiedHtml = text;
-				if (!modifiedHtml.includes("<base ")) {
-					// Insert base tag after head if it exists
-					if (modifiedHtml.includes("<head>")) {
-						modifiedHtml = modifiedHtml.replace(
-							"<head>",
-							`<head>\n<base href="${baseUrl}">`,
-						);
+				if (!modifiedHtml.includes('<base ')) {
+					if (modifiedHtml.includes('<head>')) {
+						modifiedHtml = modifiedHtml.replace('<head>', `<head>\n<base href="${baseUrl}">`);
 					} else {
-						// Otherwise try to add it at the beginning of the HTML
 						modifiedHtml = `<base href="${baseUrl}">\n${modifiedHtml}`;
 					}
 				}
 
-				// IMPORTANT: We still want to process relative URLs in the HTML
-				// but instead of keeping them relative, we need to make them include
-				// the current path context explicitly
-				modifiedHtml = modifiedHtml.replace(
-					/(src|href)=("|')(?!http|\/\/|data:|#|mailto:)([^"']*)("|')/g,
-					(match, attr, quote, path) => {
-						let assetPath;
+				modifiedHtml = modifiedHtml.replace(/(src|href)=("|')(?!http|\/\/|data:|#|mailto:)([^"']*)("|')/g, (match, attr, quote, path) => {
+					let assetPath;
 
-						// If path starts with /, it's already absolute from root
-						if (path.startsWith("/")) {
-							assetPath = path;
-						} else {
-							// For relative paths, prepend the current path context
-							// This is the key fix - explicitly include the directory context
-							assetPath = currentPathContext + path;
-						}
+					if (path.startsWith('/')) {
+						assetPath = path;
+					} else {
+						assetPath = currentPathContext + path;
+					}
 
-						// Add the version CID to the URL if we're using one
-						const versionParam = isUsingVersionCid
-							? `?orbiterVersionCid=${versionCid}`
-							: "";
-						return `${attr}=${quote}${assetPath}${versionParam}${quote}`;
-					},
-				);
+					const versionParam = isUsingVersionCid ? `?orbiterVersionCid=${versionCid}` : '';
+					return `${attr}=${quote}${assetPath}${versionParam}${quote}`;
+				});
 
 				body = modifiedHtml;
 			}
 
-			// Check if this is a media file to add Accept-Ranges header
 			const isMediaFile = cleanPath.match(/\.(mp4|webm|ogg|mov|avi|mkv|mp3|wav|flac|aac|m4a)$/i);
-			
+
 			const responseHeaders: Record<string, string> = {
-				"Content-Type": contentType || "text/plain",
-				"Access-Control-Allow-Origin": "*",
-				"Cache-Control": "public, max-age=3600",
-				"Powered-By": "Orbiter",
-				"orb-cid": cid || "",
-				"orb-contract": contract || "",
+				'Content-Type': contentType || 'text/plain',
+				'Access-Control-Allow-Origin': '*',
+				'Cache-Control': 'public, max-age=3600',
+				'Powered-By': 'Orbiter',
+				'orb-cid': cid || '',
+				'orb-contract': contract || '',
 			};
 
-			// Add Accept-Ranges header for media files to enable seeking
 			if (isMediaFile) {
-				responseHeaders["Accept-Ranges"] = "bytes";
+				responseHeaders['Accept-Ranges'] = 'bytes';
 			}
 
-			// Create response with appropriate headers
 			return new Response(body, {
 				status: response.status,
 				statusText: response.statusText,
 				headers: responseHeaders,
 			});
 		} catch (error) {
-			console.error("Error:", error);
+			console.error('Error:', error);
 			return new Response(`Error: ${error}`, {
 				status: 500,
-				headers: { "Content-Type": "text/plain" },
+				headers: { 'Content-Type': 'text/plain' },
 			});
 		}
 	},
