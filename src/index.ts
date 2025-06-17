@@ -290,7 +290,7 @@ export default {
 			}
 
 			const requestType = pathName.startsWith('/api/') ? 'api' : 'static';
-
+			console.log({requestType})
 
 			trackPageView(env, {
 				siteId: reqUrl.hostname,
