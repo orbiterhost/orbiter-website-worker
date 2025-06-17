@@ -153,6 +153,7 @@ export async function trackPageView(
 		country: string;
 		city: string;
 		ipAddress: string;
+		requestType: string;
 	}
 ): Promise<void> {
 	try {
@@ -177,7 +178,7 @@ export async function trackPageView(
 			}),
 			headers: {
 				'Content-Type': 'application/json',
-				'X-Orbiter-Analytics-Token': '_iHMtmB.72tnurmesmq.',
+				'X-Orbiter-Analytics-Token': env.ORBITER_ADMIN_KEY,
 			},
 		});
 	} catch (error) {
@@ -313,7 +314,7 @@ export function getNormalizedReferrer(referer: string): string {
 		const url = new URL(referer);
 		const domain = url.hostname;
 		// Check if this is a known shortener/service domain
-		return REFERRER_MAPPINGS[domain] || domain;
+		return REFERRER_MAPPINGS[domain]?.name || domain;
 	} catch {
 		return 'direct'; // Invalid URL
 	}
