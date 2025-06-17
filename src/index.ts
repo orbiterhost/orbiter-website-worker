@@ -3,6 +3,7 @@ import { classifyRequest, getHashedIp, getNormalizedReferrer, trackPageView } fr
 
 export interface Env {
 	ALCHEMY_URL: string;
+	ORBITER_ADMIN_KEY: string;
 	ORBITER_SITES: KVNamespace;
 	SITE_CONTRACT: KVNamespace;
 	PINATA_GATEWAY: string;
@@ -278,40 +279,33 @@ export default {
 				env.SITE_CONTRACT.get(siteKey),
 			]);
 
-			// NEW: Check if this is an API request
+			const referer = request.headers.get('referer');
+			const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
+
+			const ip = request.headers.get('x-forwarded-for');
+			let hashIp = '';
+
+			if (ip) {
+				hashIp = await getHashedIp(ip);
+			}
+
+			const requestType = pathName.startsWith('/api/') ? 'api' : 'static';
+
+
+			trackPageView(env, {
+				siteId: reqUrl.hostname,
+				path: reqUrl.pathname,
+				userAgent: request.headers.get('user-agent') || '',
+				country: request.headers.get('cf-ipcountry') || '',
+				city: request.headers.get('cf-ipcity') || '',
+				referrer: normalizedReferer,
+				ipAddress: hashIp || '',
+				requestType
+			}).catch((error) => console.error('Analytics failed:', error));
+
+			// Check if this is an API request
 			if (pathName.startsWith('/api/') && plan !== 'free') {
 				return (await handleApiRequest(request, env, siteKey)) || new Response(null);
-			}
-
-			// Continue with your existing static site logic...
-			let classification;
-			try {
-				classification = classifyRequest(request, reqUrl.pathname);
-			} catch (error) {
-				console.error('Classification failed:', error);
-				classification = { isBot: true, isAsset: false, shouldTrack: false };
-			}
-
-			if (classification.shouldTrack) {
-				const referer = request.headers.get('referer');
-				const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
-
-				const ip = request.headers.get('x-forwarded-for');
-				let hashIp = '';
-
-				if (ip) {
-					hashIp = await getHashedIp(ip);
-				}
-
-				trackPageView(env, {
-					siteId: reqUrl.hostname,
-					path: reqUrl.pathname,
-					userAgent: request.headers.get('user-agent') || '',
-					country: request.headers.get('cf-ipcountry') || '',
-					city: request.headers.get('cf-ipcity') || '',
-					referrer: normalizedReferer,
-					ipAddress: hashIp || '',
-				}).catch((error) => console.error('Analytics failed:', error));
 			}
 
 			let redirectsArray: Redirect[] = [];
