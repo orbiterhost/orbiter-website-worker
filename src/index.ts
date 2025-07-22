@@ -594,7 +594,7 @@ export default {
 			const hostname = reqUrl.hostname;
 
 			// HANDLE SSL VALIDATION CHALLENGES FIRST - This must come before any other logic
-			if (pathName.startsWith('/.well-known/')) {
+			if (pathName.startsWith('/.well-known/') && !pathName.includes("farcaster.json")) {
 				return await handleSSLValidationChallenge(request, env);
 			}
 
