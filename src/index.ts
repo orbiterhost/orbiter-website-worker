@@ -11,6 +11,12 @@ export interface Env {
 	SITE_TO_ORG: KVNamespace;
 	RATE_LIMIT: KVNamespace;
 	REDIRECTS: KVNamespace;
+	CUSTOM_DOMAINS: KVNamespace; // For new Cloudflare for SaaS domains
+	LEGACY_DOMAINS: KVNamespace; // For tracking old Digital Ocean domains
+
+	// NEW: Add these for SSL challenge handling
+	CLOUDFLARE_API_TOKEN: string;
+	CLOUDFLARE_ZONE_ID: string;
 
 	// Add dispatcher binding for API requests
 	dispatcher: Dispatcher;
@@ -39,6 +45,193 @@ interface Redirect {
 	force?: boolean;
 }
 
+interface CustomDomainMapping {
+	subdomain: string;
+	created: string;
+	cloudflare_hostname_id?: string;
+	worker_route_id?: string;
+	type: 'cloudflare-saas'; // New domains use Cloudflare for SaaS
+}
+
+interface LegacyDomainMapping {
+	subdomain: string;
+	created: string;
+	type: 'digital-ocean'; // Legacy domains through Digital Ocean
+}
+
+// Enhanced domain resolution with dual-mode support
+async function resolveSiteKey(hostname: string, env: Env): Promise<{
+	siteKey: string;
+	domainType: 'native' | 'cloudflare-saas' | 'digital-ocean';
+	isLegacy: boolean;
+}> {
+	console.log(`Resolving hostname: ${hostname}`);
+
+	// 1. Check if it's a native *.orbiter.website domain
+	if (hostname.endsWith('orbiter.website')) {
+		const siteKey = hostname.split('.')[0];
+		return {
+			siteKey,
+			domainType: 'native',
+			isLegacy: false
+		};
+	}
+
+	// 2. Check if it's a new Cloudflare for SaaS custom domain
+	const customDomainMapping = await env.CUSTOM_DOMAINS.get(hostname);
+	if (customDomainMapping) {
+		const mapping: CustomDomainMapping = JSON.parse(customDomainMapping);
+		console.log(`Cloudflare for SaaS domain ${hostname} maps to subdomain: ${mapping.subdomain}`);
+		return {
+			siteKey: mapping.subdomain,
+			domainType: 'cloudflare-saas',
+			isLegacy: false
+		};
+	}
+
+	// 3. Check if it's a legacy Digital Ocean domain
+	const legacyDomainMapping = await env.LEGACY_DOMAINS.get(hostname);
+	if (legacyDomainMapping) {
+		const mapping: LegacyDomainMapping = JSON.parse(legacyDomainMapping);
+		console.log(`Legacy Digital Ocean domain ${hostname} maps to subdomain: ${mapping.subdomain}`);
+		return {
+			siteKey: mapping.subdomain,
+			domainType: 'digital-ocean',
+			isLegacy: true
+		};
+	}
+
+	// 4. Fallback: treat unknown domains as potential legacy domains
+	// This handles existing customers whose domains weren't in LEGACY_DOMAINS yet
+	console.log(`Unknown domain ${hostname}, treating as potential legacy domain`);
+	return {
+		siteKey: hostname,
+		domainType: 'digital-ocean',
+		isLegacy: true
+	};
+}
+
+// NEW: Handle SSL validation challenges
+async function handleSSLValidationChallenge(request: Request, env: Env): Promise<Response> {
+	const url = new URL(request.url);
+	const hostname = url.hostname;
+	const pathName = url.pathname;
+	
+	console.log(`SSL validation challenge request: ${hostname}${pathName}`);
+
+	// Handle ACME challenge (for SSL certificate validation)
+	if (pathName.startsWith('/.well-known/acme-challenge/')) {
+		const token = pathName.split('/').pop();
+		console.log(`ACME challenge token: ${token}`);
+		
+		// Get the domain mapping to find the custom hostname ID
+		const domainMapping = await getDomainMapping(hostname, env);
+		if (!domainMapping) {
+			console.log(`No domain mapping found for ${hostname}`);
+			return new Response('Domain not configured', { status: 404 });
+		}
+
+		// Get the current challenge details from Cloudflare
+		try {
+			const customHostname = await getCustomHostnameStatus(domainMapping.cloudflare_hostname_id, env);
+			
+			// Find the matching validation record
+			const validationRecord = customHostname.ssl.validation_records?.find((record: any) => 
+				record.http_url && record.http_url.includes(token)
+			);
+
+			if (validationRecord && validationRecord.http_body) {
+				console.log(`Serving ACME challenge for ${hostname}: ${validationRecord.http_body}`);
+				return new Response(validationRecord.http_body, {
+					status: 200,
+					headers: {
+						'Content-Type': 'text/plain',
+						'Cache-Control': 'no-cache'
+					}
+				});
+			}
+
+			console.log(`No matching validation record found for token: ${token}`);
+			return new Response('Challenge not found', { status: 404 });
+
+		} catch (error) {
+			console.error('Error fetching validation challenge:', error);
+			return new Response('Error retrieving challenge', { status: 500 });
+		}
+	}
+
+	// Handle Cloudflare custom hostname challenge (for domain ownership)
+	if (pathName.startsWith('/.well-known/cf-custom-hostname-challenge/')) {
+		const challengeId = pathName.split('/').pop();
+		console.log(`CF custom hostname challenge: ${challengeId}`);
+		
+		// Get the domain mapping
+		const domainMapping = await getDomainMapping(hostname, env);
+		if (!domainMapping) {
+			console.log(`No domain mapping found for ${hostname}`);
+			return new Response('Domain not configured', { status: 404 });
+		}
+
+		// Get the ownership verification details from Cloudflare
+		try {
+			const customHostname = await getCustomHostnameStatus(domainMapping.cloudflare_hostname_id, env);
+			
+			if (customHostname.ownership_verification_http && 
+				customHostname.ownership_verification_http.http_url.includes(challengeId)) {
+				
+				console.log(`Serving CF hostname challenge for ${hostname}: ${customHostname.ownership_verification_http.http_body}`);
+				return new Response(customHostname.ownership_verification_http.http_body, {
+					status: 200,
+					headers: {
+						'Content-Type': 'text/plain',
+						'Cache-Control': 'no-cache'
+					}
+				});
+			}
+
+			console.log(`No matching ownership verification found for: ${challengeId}`);
+			return new Response('Challenge not found', { status: 404 });
+
+		} catch (error) {
+			console.error('Error fetching ownership challenge:', error);
+			return new Response('Error retrieving challenge', { status: 500 });
+		}
+	}
+
+	// Unknown .well-known path
+	console.log(`Unknown .well-known path: ${pathName}`);
+	return new Response('Not found', { status: 404 });
+}
+
+// NEW: Helper function to get domain mapping
+async function getDomainMapping(hostname: string, env: Env): Promise<any> {
+	// Check custom domains first
+	const customMapping = await env.CUSTOM_DOMAINS.get(hostname);
+	if (customMapping) {
+		return JSON.parse(customMapping);
+	}
+
+	// Check legacy domains
+	const legacyMapping = await env.LEGACY_DOMAINS.get(hostname);
+	if (legacyMapping) {
+		return JSON.parse(legacyMapping);
+	}
+
+	return null;
+}
+
+// NEW: Helper function to get custom hostname status
+async function getCustomHostnameStatus(customHostnameId: string, env: Env): Promise<any> {
+	const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${env.CLOUDFLARE_ZONE_ID}/custom_hostnames/${customHostnameId}`, {
+		headers: {
+			'Authorization': `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+		}
+	});
+	
+	const data = await response.json() as any;
+	return data.result;
+}
+
 // Helper function to parse Range header
 function parseRangeHeader(rangeHeader: string, contentLength: number): { start: number; end: number } | null {
 	const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
@@ -62,7 +255,6 @@ async function handleRangeRequest(
 	cid: string,
 	contract: string
 ): Promise<Response> {
-	// ... your existing range request logic
 	const headResponse = await fetch(`${gatewayUrl}/${cleanPath}`, { method: 'HEAD' });
 	if (!headResponse.ok) {
 		return new Response('File not found', { status: 404 });
@@ -130,16 +322,14 @@ async function handleRangeRequest(
 	});
 }
 
-// NEW: Handle API requests by proxying to customer worker
+// Handle API requests by proxying to customer worker
 async function handleApiRequest(request: Request, env: Env, siteKey: string): Promise<Response | null> {
-	// Look up the customer's API worker for this site
-	const workerKey = `worker:${siteKey}`; // Single API worker per site
+	const workerKey = `worker:${siteKey}`;
 	console.log({ workerKey });
 	const workerData = await env.FUNCTIONS.get(workerKey);
 
 	if (!workerData) {
 		console.log('NO WORKER DATA');
-		// No API worker deployed for this site
 		return new Response(
 			JSON.stringify({
 				error: 'API not available',
@@ -157,17 +347,12 @@ async function handleApiRequest(request: Request, env: Env, siteKey: string): Pr
 
 	try {
 		const workerInfo = JSON.parse(workerData);
-
-		// Get the worker from the dispatch namespace
 		const worker = env.dispatcher.get(workerInfo.deployedName);
 
-		// Create a new request with /api stripped from the path
-		// So /api/contact becomes /contact for the customer's worker
 		const url = new URL(request.url);
-		const hostname = url.hostname;
 		const apiPath = url.pathname.substring(5); // Remove '/api'
 		const newUrl = new URL(apiPath || '/', url.origin);
-		newUrl.search = url.search; // Preserve query parameters
+		newUrl.search = url.search;
 
 		const apiRequest = new Request(newUrl.toString(), {
 			method: request.method,
@@ -175,17 +360,14 @@ async function handleApiRequest(request: Request, env: Env, siteKey: string): Pr
 			body: request.body,
 		});
 
-		// Forward the request to the customer's worker
 		const response = await worker.fetch(apiRequest);
 
-		// Add CORS headers to the response
 		const corsHeaders = {
 			'Access-Control-Allow-Origin': '*',
 			'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
 			'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 		};
 
-		// Handle OPTIONS requests for CORS
 		if (request.method === 'OPTIONS') {
 			return new Response(null, {
 				status: 200,
@@ -193,7 +375,6 @@ async function handleApiRequest(request: Request, env: Env, siteKey: string): Pr
 			});
 		}
 
-		// Clone response and add CORS headers
 		const responseWithCors = new Response(response.body, {
 			status: response.status,
 			statusText: response.statusText,
@@ -240,6 +421,165 @@ async function handleApiRequest(request: Request, env: Env, siteKey: string): Pr
 	}
 }
 
+// Enhanced admin endpoint to manage both domain types
+async function handleAdminRequest(request: Request, env: Env): Promise<Response> {
+	const url = new URL(request.url);
+	const path = url.pathname;
+	
+	// Verify admin token
+	const authHeader = request.headers.get('Authorization');
+	const token = authHeader?.split(' ')[1];
+	
+	if (!token || token !== env.ORBITER_ADMIN_KEY) {
+		return new Response('Unauthorized', { status: 401 });
+	}
+
+	// Create new Cloudflare for SaaS domain mapping
+	if (path === '/admin/custom-domains' && request.method === 'POST') {
+		try {
+			const body: any = await request.json();
+			const { domain, subdomain, cloudflare_hostname_id, worker_route_id } = body;
+			
+			const mapping: CustomDomainMapping = {
+				subdomain,
+				created: new Date().toISOString(),
+				cloudflare_hostname_id,
+				worker_route_id,
+				type: 'cloudflare-saas'
+			};
+			
+			await env.CUSTOM_DOMAINS.put(domain, JSON.stringify(mapping));
+			
+			return new Response(JSON.stringify({
+				status: 'success',
+				message: 'Cloudflare for SaaS domain mapping created',
+				domain,
+				mapping
+			}), {
+				headers: { 'Content-Type': 'application/json' }
+			});
+		} catch (error) {
+			return new Response(JSON.stringify({
+				error: 'Failed to create custom domain mapping',
+				details: error instanceof Error ? error.message : 'Unknown error'
+			}), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+	}
+
+	// Create legacy domain mapping (for existing Digital Ocean domains)
+	if (path === '/admin/legacy-domains' && request.method === 'POST') {
+		try {
+			const body: any = await request.json();
+			const { domain, subdomain } = body;
+			
+			const mapping: LegacyDomainMapping = {
+				subdomain,
+				created: new Date().toISOString(),
+				type: 'digital-ocean'
+			};
+			
+			await env.LEGACY_DOMAINS.put(domain, JSON.stringify(mapping));
+			
+			return new Response(JSON.stringify({
+				status: 'success',
+				message: 'Legacy domain mapping created',
+				domain,
+				mapping
+			}), {
+				headers: { 'Content-Type': 'application/json' }
+			});
+		} catch (error) {
+			return new Response(JSON.stringify({
+				error: 'Failed to create legacy domain mapping',
+				details: error instanceof Error ? error.message : 'Unknown error'
+			}), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+	}
+
+	// Delete domain mappings
+	if (path === '/admin/custom-domains' && request.method === 'DELETE') {
+		try {
+			const body: any = await request.json();
+			const { domain } = body;
+			await env.CUSTOM_DOMAINS.delete(domain);
+			
+			return new Response(JSON.stringify({
+				status: 'success',
+				message: 'Custom domain mapping deleted'
+			}), {
+				headers: { 'Content-Type': 'application/json' }
+			});
+		} catch (error) {
+			return new Response(JSON.stringify({
+				error: 'Failed to delete custom domain mapping',
+				details: error instanceof Error ? error.message : 'Unknown error'
+			}), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+	}
+
+	if (path === '/admin/legacy-domains' && request.method === 'DELETE') {
+		try {
+			const body: any = await request.json();
+			const { domain } = body;
+			await env.LEGACY_DOMAINS.delete(domain);
+			
+			return new Response(JSON.stringify({
+				status: 'success',
+				message: 'Legacy domain mapping deleted'
+			}), {
+				headers: { 'Content-Type': 'application/json' }
+			});
+		} catch (error) {
+			return new Response(JSON.stringify({
+				error: 'Failed to delete legacy domain mapping',
+				details: error instanceof Error ? error.message : 'Unknown error'
+			}), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+	}
+
+	// Get domain info (useful for debugging)
+	if (path === '/admin/domain-info' && request.method === 'GET') {
+		try {
+			const domain = url.searchParams.get('domain');
+			if (!domain) {
+				return new Response('Domain parameter required', { status: 400 });
+			}
+
+			const resolution = await resolveSiteKey(domain, env);
+			
+			return new Response(JSON.stringify({
+				domain,
+				resolution,
+				timestamp: new Date().toISOString()
+			}), {
+				headers: { 'Content-Type': 'application/json' }
+			});
+		} catch (error) {
+			return new Response(JSON.stringify({
+				error: 'Failed to get domain info',
+				details: error instanceof Error ? error.message : 'Unknown error'
+			}), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+	}
+
+	return new Response('Not Found', { status: 404 });
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const pinata = new PinataSDK({
@@ -253,6 +593,16 @@ export default {
 			const pathName = reqUrl.pathname;
 			const hostname = reqUrl.hostname;
 
+			// HANDLE SSL VALIDATION CHALLENGES FIRST - This must come before any other logic
+			if (pathName.startsWith('/.well-known/')) {
+				return await handleSSLValidationChallenge(request, env);
+			}
+
+			// Handle admin requests
+			if (pathName.startsWith('/admin/')) {
+				return await handleAdminRequest(request, env);
+			}
+
 			// Block PHP file requests early
 			if (pathName.toLowerCase().endsWith('.php')) {
 				return new Response('Not Found', {
@@ -264,15 +614,20 @@ export default {
 				});
 			}
 
-			let siteKey = hostname.endsWith('orbiter.website') ? hostname.split('.')[0] : hostname;
+			// Enhanced domain resolution with dual-mode support
+			const domainResolution = await resolveSiteKey(hostname, env);
+			const siteKey = domainResolution.siteKey;
+			
+			console.log(`Domain Resolution:`, {
+				hostname,
+				siteKey,
+				domainType: domainResolution.domainType,
+				isLegacy: domainResolution.isLegacy
+			});
 
 			const versionCid = reqUrl.searchParams.get('orbiterVersionCid');
 			const orgId = (await env.SITE_TO_ORG.get(siteKey)) || '0';
 
-			// Your existing static site logic continues here...
-			// let siteCid = "bafybeie2chscyvn2llxhl2l4aftmop2cvqqjmznvbwedytvi4wiyw2xrva"
-			// let plan = "orbit"
-			// let contract = "0x"
 			let [siteCid, plan, contract] = await Promise.all([
 				env.ORBITER_SITES.get(siteKey),
 				env.SITE_PLANS.get(orgId),
@@ -282,7 +637,7 @@ export default {
 			const referer = request.headers.get('referer');
 			const normalizedReferer = referer ? getNormalizedReferrer(referer) : 'direct';
 
-			const ip = request.headers.get('x-forwarded-for');
+			const ip = request.headers.get('x-forwarded-for') || request.headers.get('cf-connecting-ip');
 			let hashIp = '';
 
 			if (ip) {
@@ -290,17 +645,17 @@ export default {
 			}
 
 			const requestType = pathName.startsWith('/api/') ? 'api' : 'static';
-			console.log({requestType})
-
+			
+			// Enhanced analytics tracking with domain type information
 			trackPageView(env, {
-				siteId: reqUrl.hostname,
+				siteId: hostname, // Use original hostname for analytics
 				path: reqUrl.pathname,
 				userAgent: request.headers.get('user-agent') || '',
 				country: request.headers.get('cf-ipcountry') || '',
 				city: request.headers.get('cf-ipcity') || '',
 				referrer: normalizedReferer,
 				ipAddress: hashIp || '',
-				requestType
+				requestType,
 			}).catch((error) => console.error('Analytics failed:', error));
 
 			// Check if this is an API request
@@ -311,8 +666,9 @@ export default {
 			let redirectsArray: Redirect[] = [];
 
 			if (plan !== 'free') {
+				// Handle original host header properly for both domain types
 				const originalHost = request.headers.get('X-Original-Host') || reqUrl.host;
-				console.log('Checking redirects');
+				console.log('Checking redirects for siteKey:', siteKey);
 				const redirectsPlain = await env.REDIRECTS.get(siteKey);
 
 				if (redirectsPlain) {
@@ -352,6 +708,8 @@ export default {
 									'Powered-By': 'Orbiter',
 									'orb-cid': siteCid || '',
 									'orb-contract': contract || '',
+									// Add domain type header for debugging
+									'orb-domain-type': domainResolution.domainType,
 								},
 							});
 						}
@@ -359,12 +717,12 @@ export default {
 				}
 			}
 
-			// Rest of your existing static site logic...
+			// Rest of your existing static site logic remains the same...
 			const isUsingVersionCid = versionCid && (await pinata.gateways.containsCID(versionCid));
 			const cid = isUsingVersionCid ? versionCid : siteCid;
 
 			if (!cid) {
-				throw new Error(`Failed to fetch latest state: ${cid}`);
+				throw new Error(`Failed to fetch site data for siteKey: ${siteKey}`);
 			}
 
 			let gatewayUrl = await pinata.gateways.convert(cid as string);
@@ -384,7 +742,6 @@ export default {
 
 				if (!pathName.startsWith('/')) {
 					const trimmedRefererDir = refererDir.startsWith('/') ? refererDir.slice(1) : refererDir;
-
 					cleanPath = `${trimmedRefererDir}${cleanPath}`;
 				}
 			}
@@ -433,6 +790,7 @@ export default {
 									'Powered-By': 'Orbiter',
 									'orb-cid': cid || '',
 									'orb-contract': contract || '',
+									'orb-domain-type': domainResolution.domainType,
 								},
 							});
 						}
@@ -461,6 +819,7 @@ export default {
 					currentPathContext = '';
 				}
 
+				// Use the original hostname for base URL construction
 				const originalHost = request.headers.get('X-Original-Host') || reqUrl.host;
 				const baseUrl = `${reqUrl.protocol}//${originalHost}${currentPathContext}`;
 
@@ -498,6 +857,7 @@ export default {
 				'Powered-By': 'Orbiter',
 				'orb-cid': cid || '',
 				'orb-contract': contract || '',
+				'orb-domain-type': domainResolution.domainType,
 			};
 
 			if (isMediaFile) {
