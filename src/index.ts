@@ -802,7 +802,10 @@ export default {
 				response = await fetch(gatewayUrl);
 			}
 
-			const contentType = response.headers.get('Content-Type') || 'text/html';
+			let contentType = response.headers.get('Content-Type') || 'text/html';
+			if (cleanPath.endsWith('.wasm')) {
+				contentType = 'application/wasm';
+			}
 			let body: any = response.body;
 
 			if (contentType?.includes('text/html')) {
